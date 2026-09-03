@@ -8,13 +8,6 @@
 **/*.dmp
 **/.thumbs
 
-# No USD files allowed in the repo
-**/*.usd
-**/*.usda
-!source/tutorial/tutorial/assets/usd/u_obstacle_collision.usda
-**/*.usdc
-**/*.usdz
-
 # Python
 .DS_Store
 **/*.egg-info/

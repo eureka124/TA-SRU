@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ta-sru"
+version = "0.1.0"
+description = "基于 Isaac Sim/Isaac Lab、无需 SB3 的非对称循环 PPO 无人机导航示例"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.21",
+    "scikit-fmm>=2025.1",
+    "torch>=2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

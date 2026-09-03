@@ -177,6 +177,7 @@ class IsaacNavigationEnvCfg(DirectRLEnvCfg):
     }
     state_space = 0
     sim = SimulationCfg(dt=1.0 / 120.0, render_interval=decimation)
+    sim.physx.gpu_found_lost_pairs_capacity = 2**23
     scene = NavigationSceneCfg(
         num_envs=4,
         env_spacing=52.0,
@@ -344,7 +345,7 @@ class NavigationEnv(DirectRLEnv):
         )
         forces = torch.zeros((self.num_envs, 1, 3), device=self.device)
         forces[:, 0, 2] = wrench[:, 0]
-        self.robot.set_external_force_and_torque(
+        self.robot.permanent_wrench_composer.set_forces_and_torques(
             forces,
             wrench[:, 1:4].unsqueeze(1),
             body_ids=self.base_link_ids,

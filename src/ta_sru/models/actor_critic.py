@@ -85,9 +85,9 @@ class CriticEncoder(nn.Module):
 
     def __init__(self, robot_state_size: int, feature_size: int) -> None:
         super().__init__()
-        self.depth = ImageEncoder((8, 16), feature_size)
+        self.depth = ImageEncoder((8, 16, 32), feature_size)
         self.robot_state = nn.Linear(robot_state_size, feature_size)
-        self.toa = ImageEncoder((8, 16), feature_size)
+        self.toa = ImageEncoder((8, 16, 32), feature_size)
 
     def forward(self, observation: Observation) -> torch.Tensor:
         return (

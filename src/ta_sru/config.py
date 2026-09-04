@@ -44,8 +44,8 @@ class EnvConfig:
     action_low: tuple[float, float, float] = (-0.1, -0.5, -1.0471975511965976)
     action_high: tuple[float, float, float] = (2.0, 0.5, 1.0471975511965976)
 
-    goal_velocity_weight: float = 0.1
-    toa_progress_weight: float = 5.0
+    goal_velocity_weight: float = 0
+    toa_progress_weight: float = 10.0
     action_smoothness_weight: float = -0.1
     contact_force_weight: float = -100.0
     goal_reached_weight: float = 300.0
@@ -85,10 +85,10 @@ class NetworkConfig:
 
     feature_dim: int = 192
     recurrent_type: str = "sru-lstm"
-    recurrent_hidden_size: int = 128
+    recurrent_hidden_size: int = 256
     recurrent_layers: int = 1
-    actor_hidden_sizes: tuple[int, ...] = (256, 256)
-    critic_hidden_sizes: tuple[int, ...] = (256, 256)
+    actor_hidden_sizes: tuple[int, ...] = (512, 512)
+    critic_hidden_sizes: tuple[int, ...] = (512, 512)
     initial_log_std: float = 0.0
     # 仅作接口预留：当前实现明确保持 Actor/Critic 深度编码器相互独立。
     share_depth_encoder: bool = False
@@ -107,7 +107,7 @@ class NetworkConfig:
 class PPOConfig:
     """Recurrent PPO 超参数，与旧工程当前训练配置对齐。"""
 
-    rollout_steps: int = 512
+    rollout_steps: int = 128
     batch_size: int = 512
     recurrent_sequence_length: int = 64
     epochs: int = 5

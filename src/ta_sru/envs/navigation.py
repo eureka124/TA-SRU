@@ -345,7 +345,7 @@ class NavigationEnv(DirectRLEnv):
         )
         forces = torch.zeros((self.num_envs, 1, 3), device=self.device)
         forces[:, 0, 2] = wrench[:, 0]
-        self.robot.permanent_wrench_composer.set_forces_and_torques(
+        self.robot.set_external_force_and_torque(
             forces,
             wrench[:, 1:4].unsqueeze(1),
             body_ids=self.base_link_ids,

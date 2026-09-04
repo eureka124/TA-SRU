@@ -14,8 +14,8 @@ from isaaclab.app import AppLauncher
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="评估 Hummingbird 导航策略")
     parser.add_argument("checkpoint")
-    parser.add_argument("--num-envs", type=int, default=4)
-    parser.add_argument("--steps", type=int, default=2000)
+    parser.add_argument("--num-envs", type=int, default=6)
+    parser.add_argument("--steps", type=int, default=20000000)
     parser.add_argument("--network-device", default=None)
     AppLauncher.add_app_launcher_args(parser)
     return parser.parse_args()

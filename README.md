@@ -17,6 +17,9 @@ sb3-contrib 或 OmniDrones。
 - Actor/Critic 各自使用深度编码器、可切换循环单元和 MLP。
 - Recurrent PPO、GAE、策略/价值裁剪、熵奖励、梯度裁剪和超时 value bootstrap。
 - 奖励包含目标方向速度、TOA 进度、动作平滑、接触力惩罚和到达奖励。
+- 训练难度在总 transition 数的 `0%、10%、25%、50%、75%` 处分阶段增加：
+  先使用单墙迷宫，再启用全部六种墙体布局，并将活动随机圆柱数量依次提升为
+  `0、0、10、30、60`；接触力惩罚在训练前 40% 线性增强。
 
 深度图由 Isaac Lab 的 `MultiMeshRayCasterCamera` 生成，碰撞力来自
 `ContactSensor`，Hummingbird 动力学由 Isaac Sim/PhysX 计算。项目内只保留实际用到的

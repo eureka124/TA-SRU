@@ -88,6 +88,12 @@ class RecurrentPPO:
             "success": self.recent_outcomes["success"],
             "collision": self.recent_outcomes["collision"],
             "timeout": self.recent_outcomes["timeout"],
+            "curriculum_stage": getattr(self.env, "training_curriculum_stage", 0),
+            "active_mazes": getattr(self.env, "training_curriculum_maze_count", 6),
+            "active_cylinders": getattr(self.env, "training_curriculum_cylinder_count", 0),
+            "contact_penalty_scale": getattr(
+                self.env, "training_curriculum_contact_scale", 1.0
+            ),
             "cpu_buffer_mib": memory_mb,
         }
         self.progress_path.parent.mkdir(parents=True, exist_ok=True)
@@ -280,6 +286,9 @@ class RecurrentPPO:
                     f"policy_loss={metrics.get('policy_loss', float('nan')):.4f} "
                     f"value_loss={metrics.get('value_loss', float('nan')):.4f} "
                     f"episodes={self.completed_episodes} outcomes={self.recent_outcomes} "
+                    f"curriculum={getattr(self.env, 'training_curriculum_stage', 0)} "
+                    f"mazes={getattr(self.env, 'training_curriculum_maze_count', 6)} "
+                    f"cylinders={getattr(self.env, 'training_curriculum_cylinder_count', 0)} "
                     f"cpu_buffer={memory_mb:.1f}MiB"
                 )
                 self.recent_outcomes = {"success": 0, "collision": 0, "timeout": 0}
@@ -308,3 +317,10 @@ class RecurrentPPO:
             self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.timesteps = int(checkpoint.get("timesteps", 0))
         self.updates = int(checkpoint.get("updates", 0))
+        if hasattr(self.env, "set_training_progress"):
+            self.env.set_training_progress(self.timesteps)
+            # 构造训练器时环境已经按第 0 阶段 reset；恢复 checkpoint 后立即
+            # 再 reset 一次，使当前墙体和圆柱数量与恢复的训练步数一致。
+            self.observation, _ = self.env.reset()
+            self.episode_starts = np.ones(self.env.num_envs, dtype=bool)
+            self.recurrent_state = self.policy.initial_state(self.env.num_envs)

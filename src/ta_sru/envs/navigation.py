@@ -30,6 +30,7 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
 from ta_sru.config import EnvConfig
+from ta_sru.envs.curriculum import select_training_maze_curriculum_stage
 from ta_sru.envs.layouts import MAZE_LAYOUTS
 from ta_sru.envs.toa import build_toa_bank, save_toa_global_maps
 from ta_sru.models.hummingbird import HummingbirdParameters, rotate_inverse, yaw_from_quaternion
@@ -258,6 +259,11 @@ class NavigationEnv(DirectRLEnv):
         self.direction_reversed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.toa_map_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.previous_toa = torch.full((self.num_envs,), torch.nan, device=self.device)
+        self.training_step_offset = 0
+        self.training_curriculum_stage = 0
+        self.training_curriculum_maze_count = 1
+        self.training_curriculum_cylinder_count = 0
+        self.training_curriculum_contact_scale = 0.0
         self._create_layout_tensors()
         self._create_toa_tensors()
         if self.task.debug:
@@ -551,6 +557,21 @@ class NavigationEnv(DirectRLEnv):
         forces = self.contact_sensor.data.net_forces_w
         return torch.linalg.vector_norm(forces, dim=-1).amax(dim=1)
 
+    @property
+    def training_elapsed_steps(self) -> int:
+        """返回包含 checkpoint 偏移的累计环境 transition 数。"""
+
+        simulated_steps = int(self.common_step_counter * self.num_envs)
+        return max(self.training_step_offset + simulated_steps, 0)
+
+    def set_training_progress(self, elapsed_steps: int) -> None:
+        """同步恢复训练后的课程进度，而不修改 Isaac Lab 内部计数器。"""
+
+        if elapsed_steps < 0:
+            raise ValueError(f"elapsed_steps 不能为负数，实际为 {elapsed_steps}")
+        simulated_steps = int(self.common_step_counter * self.num_envs)
+        self.training_step_offset = int(elapsed_steps) - simulated_steps
+
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         distance = torch.linalg.vector_norm(
             self.goal_positions[:, :2] - self.robot.data.root_pos_w[:, :2], dim=-1
@@ -579,10 +600,12 @@ class NavigationEnv(DirectRLEnv):
         return terminated, time_out
 
     def _get_rewards(self) -> torch.Tensor:
+        """计算与 manager-based training_mazes 等价的逐策略步奖励。"""
+
         goal_delta = self.goal_positions[:, :2] - self.robot.data.root_pos_w[:, :2]
-        goal_direction = goal_delta / torch.linalg.vector_norm(
-            goal_delta, dim=-1, keepdim=True
-        ).clamp_min(1.0e-6)
+        goal_direction = goal_delta / (
+            torch.linalg.vector_norm(goal_delta, dim=-1, keepdim=True) + 1.0e-6
+        )
         goal_velocity = torch.sum(self.robot.data.root_lin_vel_w[:, :2] * goal_direction, dim=-1)
         smoothness = torch.linalg.vector_norm(self.actions - self.previous_actions, dim=-1)
 
@@ -592,13 +615,16 @@ class NavigationEnv(DirectRLEnv):
         toa_progress = torch.where(
             valid, self.previous_toa - current_toa, torch.zeros_like(current_toa)
         ).clamp(-0.25, 0.25)
+        # 缓存只属于当前回合；_reset_idx 会将重置环境对应的值恢复为 NaN，
+        # 从而保证新回合第一次奖励不会与上一个回合做 TOA 差分。
         self.previous_toa.copy_(current_toa.detach())
 
         curriculum = min(
-            float(self.common_step_counter * self.num_envs)
+            float(self.training_elapsed_steps)
             / (self.task.total_training_steps * self.task.contact_penalty_ramp_fraction),
             1.0,
         )
+        self.training_curriculum_contact_scale = curriculum
         contact_penalty = (
             self._contact_force() / self.task.collision_force_threshold
         ).clamp(max=1.0) * curriculum
@@ -626,9 +652,14 @@ class NavigationEnv(DirectRLEnv):
         selected_wall_xy: torch.Tensor,
         selected_wall_yaw: torch.Tensor,
         selected_wall_active: torch.Tensor,
+        cylinder_count: int,
     ) -> torch.Tensor:
-        count = self.task.random_cylinder_count
-        positions = torch.empty((len(env_ids), count, 2), device=self.device)
+        if not 0 <= cylinder_count <= self.task.random_cylinder_count:
+            raise ValueError(
+                f"cylinder_count 必须位于 [0, {self.task.random_cylinder_count}]，"
+                f"实际为 {cylinder_count}"
+            )
+        positions = torch.empty((len(env_ids), cylinder_count, 2), device=self.device)
         vertical = torch.isclose(
             selected_wall_yaw.abs(),
             torch.full_like(selected_wall_yaw, torch.pi / 2),
@@ -637,7 +668,7 @@ class NavigationEnv(DirectRLEnv):
         )
         half_x = torch.where(vertical, self.task.wall_thickness / 2, self.task.inner_wall_length / 2)
         half_y = torch.where(vertical, self.task.inner_wall_length / 2, self.task.wall_thickness / 2)
-        for cylinder_id in range(count):
+        for cylinder_id in range(cylinder_count):
             radius = self.cylinder_radii[cylinder_id]
             limit = self.task.arena_half_extent - self.task.wall_thickness / 2 - radius - 0.35
             unresolved = torch.ones(len(env_ids), dtype=torch.bool, device=self.device)
@@ -674,7 +705,22 @@ class NavigationEnv(DirectRLEnv):
         if self.task.debug:
             self._trajectory_counts[env_ids] = 0
         count = len(env_ids)
-        maze_ids = self.maze_ids[env_ids]
+        curriculum_stage = select_training_maze_curriculum_stage(
+            elapsed_steps=self.training_elapsed_steps,
+            max_steps=self.task.total_training_steps,
+            stage_fractions=self.task.training_curriculum_stage_fractions,
+            maze_counts=self.task.training_curriculum_maze_counts,
+            cylinder_counts=self.task.training_curriculum_cylinder_counts,
+        )
+        # --cylinders 可以减少实际创建的槽位；课程数量相应封顶，但默认 60
+        # 个槽位时与参考任务的 0/0/10/30/60 调度完全一致。
+        active_cylinder_count = min(
+            curriculum_stage.cylinder_count, self.task.random_cylinder_count
+        )
+        self.training_curriculum_stage = curriculum_stage.index
+        self.training_curriculum_maze_count = curriculum_stage.maze_count
+        self.training_curriculum_cylinder_count = active_cylinder_count
+        maze_ids = torch.remainder(env_ids, curriculum_stage.maze_count)
         route_ids = torch.randint(0, 2, (count,), device=self.device)
         reversed_direction = torch.rand(count, device=self.device) < 0.5
         starts = self.route_starts[maze_ids, route_ids]
@@ -683,6 +729,7 @@ class NavigationEnv(DirectRLEnv):
         goal_xy = torch.where(reversed_direction[:, None], starts, goals)
         origins = self.scene.env_origins[env_ids]
 
+        self.maze_ids[env_ids] = maze_ids
         self.route_ids[env_ids] = route_ids
         self.direction_reversed[env_ids] = reversed_direction
         self.toa_map_ids[env_ids] = maze_ids * 4 + route_ids * 2 + reversed_direction.long()
@@ -720,11 +767,25 @@ class NavigationEnv(DirectRLEnv):
             wall.write_root_velocity_to_sim(torch.zeros((count, 6), device=self.device), env_ids)
 
         cylinder_xy = self._sample_cylinder_positions(
-            env_ids, start_xy, goal_xy, selected_xy, selected_yaw, selected_active
+            env_ids,
+            start_xy,
+            goal_xy,
+            selected_xy,
+            selected_yaw,
+            selected_active,
+            active_cylinder_count,
         )
         cylinder_pose = self.random_cylinders.data.default_object_state[env_ids, :, :7].clone()
-        cylinder_pose[:, :, :2] = origins[:, None, :2] + cylinder_xy
-        cylinder_pose[:, :, 2] = self.cylinder_heights[None] / 2
+        # 未启用的固定槽位停放到地面以下，避免动态改变场景拓扑。
+        cylinder_pose[:, :, :2] = origins[:, None, :2]
+        cylinder_pose[:, :, 2] = -10.0
+        if active_cylinder_count > 0:
+            cylinder_pose[:, :active_cylinder_count, :2] = (
+                origins[:, None, :2] + cylinder_xy
+            )
+            cylinder_pose[:, :active_cylinder_count, 2] = (
+                self.cylinder_heights[:active_cylinder_count][None] / 2
+            )
         self.random_cylinders.write_object_pose_to_sim(cylinder_pose, env_ids=env_ids)
         self.random_cylinders.write_object_velocity_to_sim(
             torch.zeros((count, self.task.random_cylinder_count, 6), device=self.device),

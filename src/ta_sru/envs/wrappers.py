@@ -36,6 +36,27 @@ class IsaacLabWrapper:
             {} for _ in range(self.num_envs)
         ]
 
+    def set_training_progress(self, elapsed_steps: int) -> None:
+        """将训练器的累计 transition 数同步给环境课程。"""
+
+        self.env.set_training_progress(elapsed_steps)
+
+    @property
+    def training_curriculum_stage(self) -> int:
+        return self.env.training_curriculum_stage
+
+    @property
+    def training_curriculum_maze_count(self) -> int:
+        return self.env.training_curriculum_maze_count
+
+    @property
+    def training_curriculum_cylinder_count(self) -> int:
+        return self.env.training_curriculum_cylinder_count
+
+    @property
+    def training_curriculum_contact_scale(self) -> float:
+        return self.env.training_curriculum_contact_scale
+
     def step(
         self, actions: np.ndarray | torch.Tensor
     ) -> tuple[

@@ -31,6 +31,12 @@ class EnvConfig:
     random_cylinder_count: int = 60
     drone_radius: float = 0.4
 
+    # 难度课程与参考 training_mazes 一致：先学习简单单墙迷宫，再启用全部
+    # 六种墙体布局，之后逐步增加随机圆柱。数量表示已生成圆柱槽位的活动前缀。
+    training_curriculum_stage_fractions: tuple[float, ...] = (0.0, 0.10, 0.25, 0.50, 0.75)
+    training_curriculum_maze_counts: tuple[int, ...] = (1, 6, 6, 6, 6)
+    training_curriculum_cylinder_counts: tuple[int, ...] = (0, 0, 10, 30, 60)
+
     depth_height: int = 12
     depth_width: int = 16
     depth_max_distance: float = 10.0
@@ -46,8 +52,10 @@ class EnvConfig:
     action_low: tuple[float, float, float] = (-0.1, -0.5, -1.0471975511965976)
     action_high: tuple[float, float, float] = (2.0, 0.5, 1.0471975511965976)
 
-    goal_velocity_weight: float = 0
-    toa_progress_weight: float = 10.0
+    # 与 manager_based/training_mazes 的逐策略步奖励系数保持一致。
+    # DirectRLEnv 不会像 RewardManager 一样再乘 policy_dt，因此这里直接保存最终系数。
+    goal_velocity_weight: float = 0.1
+    toa_progress_weight: float = 5.0
     action_smoothness_weight: float = -0.1
     contact_force_weight: float = -100.0
     goal_reached_weight: float = 300.0
@@ -75,6 +83,21 @@ class EnvConfig:
             raise ValueError("TOA 安全距离必须为正，慢速比例必须位于 (0, 1]")
         if self.random_cylinder_count <= 0:
             raise ValueError("random_cylinder_count 必须为正数")
+        if self.random_cylinder_count > 60:
+            raise ValueError("random_cylinder_count 不能超过 60")
+        from ta_sru.envs.curriculum import select_training_maze_curriculum_stage
+
+        select_training_maze_curriculum_stage(
+            elapsed_steps=0,
+            max_steps=self.total_training_steps,
+            stage_fractions=self.training_curriculum_stage_fractions,
+            maze_counts=self.training_curriculum_maze_counts,
+            cylinder_counts=self.training_curriculum_cylinder_counts,
+        )
+        if any(count > 6 for count in self.training_curriculum_maze_counts):
+            raise ValueError("课程阶段启用的迷宫数量不能超过 6")
+        if any(count > 60 for count in self.training_curriculum_cylinder_counts):
+            raise ValueError("课程阶段启用的圆柱数量不能超过 60")
         if any(low >= high for low, high in zip(self.action_low, self.action_high)):
             raise ValueError("每个动作下界都必须小于上界")
         if not 0.0 < self.contact_penalty_ramp_fraction <= 1.0:
@@ -148,9 +171,10 @@ class TrainConfig:
     checkpoint_dir: str = "checkpoints"
 
     def validate(self) -> None:
+        if self.total_timesteps <= 0:
+            raise ValueError("total_timesteps 必须为正数")
+        # 环境的两套课程均以训练器实际使用的总 transition 数为时间轴。
+        self.env.total_training_steps = self.total_timesteps
         self.env.validate()
         self.network.validate()
         self.ppo.validate(self.env.num_envs)
-        if self.total_timesteps <= 0:
-            raise ValueError("total_timesteps 必须为正数")
-        self.env.total_training_steps = self.total_timesteps

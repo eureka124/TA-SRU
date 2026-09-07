@@ -18,6 +18,8 @@ class EnvConfig:
 
     num_envs: int = 4
     seed: int = 123
+    debug: bool = False
+    debug_output_dir: str | None = None
     physics_dt: float = 1.0 / 120.0
     control_decimation: int = 5
     episode_seconds: float = 40.0

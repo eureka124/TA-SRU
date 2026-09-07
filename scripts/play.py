@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -17,6 +18,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-envs", type=int, default=6)
     parser.add_argument("--steps", type=int, default=20000000)
     parser.add_argument("--network-device", default=None)
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="显示目标、速度和轨迹标记，并保存六种迷宫的全局 TOA 图",
+    )
     AppLauncher.add_app_launcher_args(parser)
     return parser.parse_args()
 
@@ -29,10 +35,19 @@ def main() -> None:
     from ta_sru.config import EnvConfig, NetworkConfig, PPOConfig, TrainConfig
     from ta_sru.envs import IsaacLabWrapper, NavigationEnv, make_isaac_env_cfg
 
-    checkpoint = torch.load(args.checkpoint, map_location="cpu")
+    checkpoint_path = Path(args.checkpoint).resolve()
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
     values = checkpoint["config"]
     env_values = dict(values["env"])
     env_values["num_envs"] = args.num_envs
+    debug_root = (
+        checkpoint_path.parent.parent
+        if checkpoint_path.parent.name == "checkpoints"
+        else checkpoint_path.parent
+    )
+    # 不继承 checkpoint 中的调试状态；只有本次显式传入 --debug 才启用。
+    env_values["debug"] = args.debug
+    env_values["debug_output_dir"] = str(debug_root / "debug") if args.debug else None
     config = TrainConfig(
         env=EnvConfig(**env_values),
         network=NetworkConfig(**values["network"]),
@@ -41,6 +56,8 @@ def main() -> None:
         device=args.network_device or args.device,
     )
     print(f"循环单元：{config.network.recurrent_type}")
+    if args.debug:
+        print(f"调试输出：{config.env.debug_output_dir}")
 
     env = None
     try:

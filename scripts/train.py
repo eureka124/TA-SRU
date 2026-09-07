@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", default=None)
     parser.add_argument("--toa-grid-size", type=int, default=401)
     parser.add_argument("--cylinders", type=int, default=60)
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="显示目标、速度和轨迹标记，并保存六种迷宫的全局 TOA 图",
+    )
     AppLauncher.add_app_launcher_args(parser)
     return parser.parse_args()
 
@@ -54,15 +59,17 @@ def main() -> None:
 
     env = None
     try:
-        task_config = EnvConfig(
-            num_envs=args.num_envs,
-            seed=args.seed,
-            toa_grid_size=args.toa_grid_size,
-            random_cylinder_count=args.cylinders,
-        )
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         run_name = f"{args.recurrent_type}_{args.run_name or timestamp}"
         log_dir = Path(args.log_dir) / run_name
+        task_config = EnvConfig(
+            num_envs=args.num_envs,
+            seed=args.seed,
+            debug=args.debug,
+            debug_output_dir=str(log_dir / "debug") if args.debug else None,
+            toa_grid_size=args.toa_grid_size,
+            random_cylinder_count=args.cylinders,
+        )
         checkpoint_dir = (
             log_dir / "checkpoints"
             if args.checkpoint_dir is None
@@ -92,6 +99,8 @@ def main() -> None:
         print(f"循环单元：{args.recurrent_type}")
         print(f"训练日志：{log_dir}")
         print(f"模型目录：{checkpoint_dir}")
+        if args.debug:
+            print(f"调试输出：{task_config.debug_output_dir}")
         isaac_config = make_isaac_env_cfg(task_config, sim_device=args.device)
         env = IsaacLabWrapper(NavigationEnv(isaac_config, task_config))
         agent = RecurrentPPO(env, config)

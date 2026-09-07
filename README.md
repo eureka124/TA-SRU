@@ -100,6 +100,11 @@ python scripts/train.py --headless --device cuda:0 --recurrent-type lstm
 python scripts/play.py runs/sru-gru_时间戳/checkpoints/model_final.pt --device cuda:0
 ```
 
+需要检查导航过程时，在训练或评估命令后添加 `--debug`。该开关会显示目标点、位于
+无人机上方且长度随实际水平速度变化的速度圆锥，以及每个环境当前回合的飞行轨迹；
+同时会在运行目录的 `debug/` 下保存六种迷宫各自的 4×1 全局 TOA 汇总 PNG 和原始 NPZ。
+未传入 `--debug` 时不会创建这些标记或文件。
+
 `--device` 是 Isaac 仿真设备，`--network-device` 可单独指定网络设备。显存紧张时优先
 减小 `--num-envs`、`--batch-size` 和 `--sequence-length`；rollout buffer 始终留在 CPU。
 

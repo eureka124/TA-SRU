@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.21",
+    "Pillow>=8",
     "scikit-fmm>=2025.1",
     "torch>=2.0",
 ]

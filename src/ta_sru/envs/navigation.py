@@ -22,6 +22,7 @@ from isaaclab.assets import (
     RigidObjectCollectionCfg,
 )
 from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensor, ContactSensorCfg, MultiMeshRayCasterCamera, MultiMeshRayCasterCameraCfg
 from isaaclab.sensors.ray_caster import patterns
@@ -30,7 +31,7 @@ from isaaclab.utils import configclass
 
 from ta_sru.config import EnvConfig
 from ta_sru.envs.layouts import MAZE_LAYOUTS
-from ta_sru.envs.toa import build_toa_bank
+from ta_sru.envs.toa import build_toa_bank, save_toa_global_maps
 from ta_sru.models.hummingbird import HummingbirdParameters, rotate_inverse, yaw_from_quaternion
 from ta_sru.models.hummingbird_asset import HUMMINGBIRD_CFG
 from ta_sru.models.lee_controller import LeePositionController
@@ -39,6 +40,8 @@ from ta_sru.models.lee_controller import LeePositionController
 MAX_INNER_WALLS = 3
 MAX_RANDOM_CYLINDERS = 60
 CYLINDER_VARIANTS = ((0.30, 2.5), (0.45, 3.2), (0.60, 4.0))
+TRAJECTORY_MAX_POINTS = 512
+TRAJECTORY_POINT_SPACING = 0.15
 
 
 def _fixed_cuboid(size: tuple[float, float, float]) -> sim_utils.CuboidCfg:
@@ -163,6 +166,7 @@ class NavigationSceneCfg(InteractiveSceneCfg):
 
 @configclass
 class IsaacNavigationEnvCfg(DirectRLEnvCfg):
+    debug_vis: bool = False
     decimation = 5
     episode_length_s = 40.0
     action_space = gym.spaces.Box(
@@ -201,6 +205,7 @@ def make_isaac_env_cfg(task: EnvConfig, sim_device: str) -> IsaacNavigationEnvCf
     cfg.sim.render_interval = task.control_decimation
     cfg.sim.device = sim_device
     cfg.scene.num_envs = task.num_envs
+    cfg.debug_vis = task.debug
     cfg.action_space = gym.spaces.Box(
         np.asarray(task.action_low, dtype=np.float32),
         np.asarray(task.action_high, dtype=np.float32),
@@ -255,6 +260,14 @@ class NavigationEnv(DirectRLEnv):
         self.previous_toa = torch.full((self.num_envs,), torch.nan, device=self.device)
         self._create_layout_tensors()
         self._create_toa_tensors()
+        if self.task.debug:
+            self._trajectory_history = torch.zeros(
+                (self.num_envs, TRAJECTORY_MAX_POINTS, 3), device=self.device
+            )
+            self._trajectory_counts = torch.zeros(
+                self.num_envs, dtype=torch.long, device=self.device
+            )
+            self.set_debug_vis(self.cfg.debug_vis)
 
     def _setup_scene(self) -> None:
         self.robot: Articulation = self.scene["robot"]
@@ -295,7 +308,12 @@ class NavigationEnv(DirectRLEnv):
         )
 
     def _create_toa_tensors(self) -> None:
-        self.toa_maps = torch.from_numpy(build_toa_bank(self.task)).to(self.device)
+        toa_bank = build_toa_bank(self.task)
+        self.toa_maps = torch.from_numpy(toa_bank).to(self.device)
+        if self.task.debug:
+            output_dir = self.task.debug_output_dir or "debug"
+            saved = save_toa_global_maps(self.task, toa_bank, output_dir)
+            print(f"[DEBUG] 已保存 {len(saved)} 种迷宫的全局 TOA 图：{output_dir}")
         half_extent = self.task.toa_crop_size * self.task.toa_crop_spacing / 2
         coordinates = torch.linspace(
             -half_extent + self.task.toa_crop_spacing / 2,
@@ -305,6 +323,102 @@ class NavigationEnv(DirectRLEnv):
         )
         grid_x, grid_y = torch.meshgrid(coordinates, coordinates, indexing="xy")
         self.toa_crop_body = torch.stack((grid_x, grid_y), dim=-1).reshape(-1, 2)
+
+    def _set_debug_vis_impl(self, debug_vis: bool) -> None:
+        """创建或隐藏仅由命令行 ``--debug`` 启用的导航标记。"""
+
+        if not self.task.debug:
+            return
+        if debug_vis and not hasattr(self, "goal_visualizer"):
+            self.goal_visualizer = VisualizationMarkers(
+                VisualizationMarkersCfg(
+                    prim_path="/Visuals/TA_SRU/Goals",
+                    markers={
+                        "goal": sim_utils.SphereCfg(
+                            radius=0.35,
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(0.1, 1.0, 0.15)
+                            ),
+                        )
+                    },
+                )
+            )
+            self.velocity_visualizer = VisualizationMarkers(
+                VisualizationMarkersCfg(
+                    prim_path="/Visuals/TA_SRU/VelocityCones",
+                    markers={
+                        "velocity": sim_utils.ConeCfg(
+                            radius=0.20,
+                            height=1.0,
+                            axis="X",
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(1.0, 0.35, 0.05)
+                            ),
+                        )
+                    },
+                )
+            )
+            self.trajectory_visualizer = VisualizationMarkers(
+                VisualizationMarkersCfg(
+                    prim_path="/Visuals/TA_SRU/Trajectories",
+                    markers={
+                        "point": sim_utils.SphereCfg(
+                            radius=0.055,
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(0.1, 0.65, 1.0)
+                            ),
+                        )
+                    },
+                )
+            )
+
+        if hasattr(self, "goal_visualizer"):
+            self.goal_visualizer.set_visibility(debug_vis)
+            self.velocity_visualizer.set_visibility(debug_vis)
+            self.trajectory_visualizer.set_visibility(debug_vis)
+
+    def _debug_vis_callback(self, event) -> None:
+        """刷新目标、实际速度圆锥和当前回合轨迹。"""
+
+        if not self.task.debug or not self.robot.is_initialized:
+            return
+
+        self.goal_visualizer.visualize(self.goal_positions)
+
+        velocity_xy = self.robot.data.root_lin_vel_w[:, :2]
+        speed = torch.linalg.vector_norm(velocity_xy, dim=-1)
+        direction = velocity_xy / speed[:, None].clamp_min(1.0e-6)
+        cone_length = speed.clamp(0.10, 4.0)
+        cone_positions = self.robot.data.root_pos_w.clone()
+        cone_positions[:, 2] += 0.75
+        cone_positions[:, :2] += direction * (0.5 * cone_length)[:, None]
+        cone_orientations = self._yaw_quaternion(torch.atan2(velocity_xy[:, 1], velocity_xy[:, 0]))
+        cone_scales = torch.ones((self.num_envs, 3), device=self.device)
+        cone_scales[:, 0] = cone_length
+        self.velocity_visualizer.visualize(
+            cone_positions,
+            orientations=cone_orientations,
+            scales=cone_scales,
+        )
+
+        positions = self.robot.data.root_pos_w
+        empty = self._trajectory_counts == 0
+        last_indices = (self._trajectory_counts - 1).clamp_min(0)
+        last_positions = self._trajectory_history[
+            torch.arange(self.num_envs, device=self.device), last_indices
+        ]
+        moved = torch.linalg.vector_norm(positions - last_positions, dim=-1) >= TRAJECTORY_POINT_SPACING
+        append = (empty | moved) & (self._trajectory_counts < TRAJECTORY_MAX_POINTS)
+        env_ids = torch.nonzero(append, as_tuple=False).squeeze(-1)
+        if len(env_ids):
+            slots = self._trajectory_counts[env_ids]
+            self._trajectory_history[env_ids, slots] = positions[env_ids]
+            self._trajectory_counts[env_ids] += 1
+
+        valid = torch.arange(TRAJECTORY_MAX_POINTS, device=self.device)[None, :] < (
+            self._trajectory_counts[:, None]
+        )
+        self.trajectory_visualizer.visualize(self._trajectory_history[valid])
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.previous_actions.copy_(self.actions)
@@ -557,6 +671,8 @@ class NavigationEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: Sequence[int]) -> None:
         env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
         super()._reset_idx(env_ids)
+        if self.task.debug:
+            self._trajectory_counts[env_ids] = 0
         count = len(env_ids)
         maze_ids = self.maze_ids[env_ids]
         route_ids = torch.randint(0, 2, (count,), device=self.device)

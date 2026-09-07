@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import skfmm
 
@@ -95,3 +97,119 @@ def build_toa_bank(config: EnvConfig) -> np.ndarray:
             maps.append(build_toa_map(config, layout_id, goal))
             maps.append(build_toa_map(config, layout_id, start))
     return np.stack(maps).astype(np.float32, copy=False)
+
+
+def _traversable_toa_max(values: np.ndarray) -> float:
+    """返回剔除墙体/不可达区域后的最大 TOA。"""
+
+    traversable = np.isfinite(values) & (values < 1.0e5)
+    if not np.any(traversable):
+        return 1.0
+    return max(float(np.max(values[traversable])), 1.0e-6)
+
+
+def _toa_rgb(values: np.ndarray) -> np.ndarray:
+    """使用蓝到红的 HSV 色相渐变渲染一张 TOA 图。"""
+
+    blocked = ~np.isfinite(values) | (values >= 1.0e5)
+    normalized = np.clip(values / _traversable_toa_max(values), 0.0, 1.0)
+
+    # HSV: 最短到达时间为蓝色，最大到达时间为红色。
+    hue = (1.0 - normalized) * (2.0 / 3.0)
+    sector = np.floor(hue * 6.0).astype(np.int64)
+    fraction = hue * 6.0 - sector
+    value = np.ones_like(hue)
+    zero = np.zeros_like(hue)
+    inverse = 1.0 - fraction
+    choices = (
+        np.stack((value, fraction, zero), axis=-1),
+        np.stack((inverse, value, zero), axis=-1),
+        np.stack((zero, value, fraction), axis=-1),
+        np.stack((zero, inverse, value), axis=-1),
+        np.stack((fraction, zero, value), axis=-1),
+        np.stack((value, zero, inverse), axis=-1),
+    )
+    rgb = np.choose((sector % 6)[..., None], choices) * 255.0
+    rgb[blocked] = (20, 20, 20)
+    # 数组第 0 行对应最小 y；保存时翻转，使地图上方对应世界坐标 +Y。
+    return np.flipud(rgb.astype(np.uint8))
+
+
+def save_toa_global_maps(
+    config: EnvConfig,
+    toa_bank: np.ndarray,
+    output_dir: str | Path,
+) -> list[Path]:
+    """为六种迷宫各保存一张 4×1 全局 TOA 汇总图和原始数组。
+
+    每张 PNG 依次包含路线 1 正向/反向、路线 2 正向/反向。原始 ``npz``
+    中保留相同的四张浮点 TOA 图，便于后续分析。
+    """
+
+    from PIL import Image, ImageDraw
+
+    expected_maps = len(MAZE_LAYOUTS) * 4
+    if toa_bank.shape != (expected_maps, config.toa_grid_size, config.toa_grid_size):
+        raise ValueError(
+            f"TOA bank 形状应为 {(expected_maps, config.toa_grid_size, config.toa_grid_size)}，"
+            f"实际为 {toa_bank.shape}"
+        )
+
+    destination = Path(output_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    labels = ("route 1 forward", "route 1 reverse", "route 2 forward", "route 2 reverse")
+    tile_size = config.toa_grid_size
+    label_height = 24
+    gap = 8
+    canvas_size = 4 * tile_size + 3 * gap, tile_size + label_height
+    saved: list[Path] = []
+
+    for layout_id, layout in enumerate(MAZE_LAYOUTS):
+        maps = toa_bank[layout_id * 4 : layout_id * 4 + 4]
+        canvas = Image.new("RGB", canvas_size, (245, 245, 245))
+        draw = ImageDraw.Draw(canvas)
+        for map_id, (values, label) in enumerate(zip(maps, labels)):
+            column, row = map_id, 0
+            left = column * (tile_size + gap)
+            top = row * (tile_size + label_height + gap)
+            maximum = _traversable_toa_max(values)
+            draw.text(
+                (left + 4, top + 4),
+                f"{label} | traversable max: {maximum:.2f}",
+                fill=(20, 20, 20),
+            )
+            tile = Image.fromarray(_toa_rgb(values), mode="RGB")
+            canvas.paste(tile, (left, top + label_height))
+
+            route_id = map_id // 2
+            reversed_direction = bool(map_id % 2)
+            route_start, route_goal = layout.routes[route_id]
+            start, goal = (
+                (route_goal, route_start) if reversed_direction else (route_start, route_goal)
+            )
+
+            def pixel(point: tuple[float, float]) -> tuple[int, int]:
+                scale = (tile_size - 1) / (2.0 * config.arena_half_extent)
+                x = round((point[0] + config.arena_half_extent) * scale) + left
+                y = round((config.arena_half_extent - point[1]) * scale) + top + label_height
+                return x, y
+
+            for point, color in ((start, (0, 255, 255)), (goal, (255, 70, 70))):
+                x, y = pixel(point)
+                radius = max(3, tile_size // 100)
+                draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
+
+        image_path = destination / f"{layout.name}_toa_global.png"
+        data_path = destination / f"{layout.name}_toa_global.npz"
+        canvas.save(image_path)
+        np.savez_compressed(
+            data_path,
+            toa=maps,
+            labels=np.asarray(labels),
+            arena_half_extent=np.float32(config.arena_half_extent),
+        )
+        saved.append(image_path)
+    return saved
+
+
+__all__ = ["build_toa_bank", "build_toa_map", "save_toa_global_maps"]

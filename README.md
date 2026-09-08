@@ -111,6 +111,18 @@ python scripts/play.py runs/sru-gru_时间戳/checkpoints/model_final.pt --devic
 `--device` 是 Isaac 仿真设备，`--network-device` 可单独指定网络设备。显存紧张时优先
 减小 `--num-envs`、`--batch-size` 和 `--sequence-length`；rollout buffer 始终留在 CPU。
 
+训练指标默认每次 PPO 更新写入 `progress.csv` 和同一运行目录下的
+TensorBoard 事件文件。其中既有与 CSV 列对应的 `progress/*`，也保留
+`rollout/*`、`train/*`、`time/fps` 和 `Metrics/*` 等旧 SB3 实验标签。可用
+`--log-interval N` 改为每 N 次更新记录，并使用以下命令查看：
+
+```bash
+tensorboard --logdir runs
+```
+
+已有 CSV 可用 `python scripts/progress_to_tensorboard.py runs/<运行名>/progress.csv`
+一次性回填到该运行的 TensorBoard 事件中。
+
 训练前可通过 `--recurrent-type` 选择：
 
 | 参数 | 循环单元 |

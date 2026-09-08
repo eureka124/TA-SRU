@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.21",
     "Pillow>=8",
     "scikit-fmm>=2025.1",
+    "tensorboard>=2.10",
     "torch>=2.0",
 ]
 

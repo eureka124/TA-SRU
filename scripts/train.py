@@ -37,6 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", default=None, help="可选实验名，循环单元名称会自动作为前缀")
     parser.add_argument("--checkpoint-dir", default=None, help="可选 checkpoint 根目录")
     parser.add_argument("--resume", default=None)
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=1,
+        help="每隔多少次 PPO 更新写入 CSV 和 TensorBoard（默认：1）",
+    )
     parser.add_argument("--toa-grid-size", type=int, default=401)
     parser.add_argument("--cylinders", type=int, default=60)
     parser.add_argument(
@@ -85,6 +91,7 @@ def main() -> None:
             ),
             total_timesteps=args.total_timesteps,
             device=args.network_device or args.device,
+            log_interval=args.log_interval,
             log_dir=str(log_dir),
             checkpoint_dir=str(checkpoint_dir),
         )

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-
 RECURRENT_TYPES = ("sru-lstm", "sru-gru", "sru-lstm-gate", "lstm")
 
 
@@ -33,7 +32,7 @@ class EnvConfig:
 
     # 难度课程与参考 training_mazes 一致：先学习简单单墙迷宫，再启用全部
     # 六种墙体布局，之后逐步增加随机圆柱。数量表示已生成圆柱槽位的活动前缀。
-    training_curriculum_stage_fractions: tuple[float, ...] = (0.0, 0.10, 0.25, 0.50, 0.75)
+    training_curriculum_stage_fractions: tuple[float, ...] = (0.0, 0.10, 0.20, 0.35, 0.50)
     training_curriculum_maze_counts: tuple[int, ...] = (1, 6, 6, 6, 6)
     training_curriculum_cylinder_counts: tuple[int, ...] = (0, 0, 10, 30, 60)
 
@@ -165,7 +164,7 @@ class TrainConfig:
     ppo: PPOConfig = field(default_factory=PPOConfig)
     total_timesteps: int = 70_000_000
     device: str = "cuda"
-    log_interval: int = 10
+    log_interval: int = 1
     checkpoint_interval: int = 20
     log_dir: str | None = None
     checkpoint_dir: str = "checkpoints"
@@ -173,6 +172,8 @@ class TrainConfig:
     def validate(self) -> None:
         if self.total_timesteps <= 0:
             raise ValueError("total_timesteps 必须为正数")
+        if self.log_interval <= 0 or self.checkpoint_interval <= 0:
+            raise ValueError("日志和 checkpoint 间隔必须为正数")
         # 环境的两套课程均以训练器实际使用的总 transition 数为时间轴。
         self.env.total_training_steps = self.total_timesteps
         self.env.validate()

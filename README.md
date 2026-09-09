@@ -116,11 +116,21 @@ TensorBoard 事件文件。其中既有与 CSV 列对应的 `progress/*`，也�
 `rollout/*`、`train/*`、`time/fps` 和 `Metrics/*` 等旧 SB3 实验标签。可用
 `--log-interval N` 改为每 N 次更新记录，并使用以下命令查看：
 
+```bash
+tensorboard --logdir runs
+```
+
 训练期间终端会持续显示“已训练步数/总训练步数”进度条；从 checkpoint 恢复时，
 进度条会从 checkpoint 保存的训练步数继续累计。
 
+默认每 5 次 PPO 更新在 `checkpoints/` 中保存一次 checkpoint，可通过
+`--checkpoint-interval N` 调整；设为 `1` 表示每次更新都保存。训练期间在终端按
+`Ctrl+C` 会先保存 `model_interrupted_<已训练步数>.pt`，再安全关闭仿真。恢复示例：
+
 ```bash
-tensorboard --logdir runs
+python scripts/train.py \
+  --resume runs/<运行名>/checkpoints/model_interrupted_<已训练步数>.pt \
+  --headless --device cuda:0
 ```
 
 已有 CSV 可用 `python scripts/progress_to_tensorboard.py runs/<运行名>/progress.csv`

@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 import shlex
+import signal
 import subprocess
 import sys
 from dataclasses import asdict
@@ -42,6 +43,12 @@ def parse_args() -> argparse.Namespace:
         "--run-name", default=None, help="可选实验名，循环单元名称会自动作为前缀"
     )
     parser.add_argument("--checkpoint-dir", default=None, help="可选 checkpoint 根目录")
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=5,
+        help="每隔多少次 PPO 更新保存 checkpoint（默认：5）",
+    )
     parser.add_argument("--resume", default=None)
     parser.add_argument(
         "--commit-id",
@@ -124,6 +131,12 @@ def _capture_source_state(
     return commit_id, diff_content
 
 
+def _raise_keyboard_interrupt(_signal_number: int, _frame: object) -> None:
+    """确保终端 SIGINT 能进入训练脚本的中断保存流程。"""
+
+    raise KeyboardInterrupt
+
+
 def main() -> None:
     args = parse_args()
     repository_root = Path(__file__).resolve().parents[1]
@@ -166,6 +179,7 @@ def main() -> None:
             total_timesteps=args.total_timesteps,
             device=args.network_device or args.device,
             log_interval=args.log_interval,
+            checkpoint_interval=args.checkpoint_interval,
             log_dir=str(log_dir),
             checkpoint_dir=str(checkpoint_dir),
         )
@@ -190,11 +204,23 @@ def main() -> None:
         agent = RecurrentPPO(env, config)
         if args.resume:
             agent.load(args.resume)
+        previous_sigint_handler = signal.signal(
+            signal.SIGINT, _raise_keyboard_interrupt
+        )
         try:
             agent.learn()
         except KeyboardInterrupt:
-            print("\n收到中断，保存当前模型。")
-        agent.save(checkpoint_dir / "model_final.pt")
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            interrupted_checkpoint = (
+                checkpoint_dir / f"model_interrupted_{agent.timesteps}.pt"
+            )
+            print(f"\n收到中断，正在保存 checkpoint：{interrupted_checkpoint}")
+            agent.save(interrupted_checkpoint)
+            print("中断 checkpoint 已保存，可以使用 --resume 继续训练。")
+        else:
+            agent.save(checkpoint_dir / "model_final.pt")
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint_handler)
     finally:
         if env is not None:
             env.close()

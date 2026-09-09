@@ -32,7 +32,13 @@ class EnvConfig:
 
     # 难度课程与参考 training_mazes 一致：先学习简单单墙迷宫，再启用全部
     # 六种墙体布局，之后逐步增加随机圆柱。数量表示已生成圆柱槽位的活动前缀。
-    training_curriculum_stage_fractions: tuple[float, ...] = (0.0, 0.10, 0.20, 0.35, 0.50)
+    training_curriculum_stage_fractions: tuple[float, ...] = (
+        0.0,
+        0.10,
+        0.20,
+        0.35,
+        0.50,
+    )
     training_curriculum_maze_counts: tuple[int, ...] = (1, 6, 6, 6, 6)
     training_curriculum_cylinder_counts: tuple[int, ...] = (0, 0, 10, 30, 60)
 
@@ -165,7 +171,7 @@ class TrainConfig:
     total_timesteps: int = 70_000_000
     device: str = "cuda"
     log_interval: int = 1
-    checkpoint_interval: int = 20
+    checkpoint_interval: int = 5
     log_dir: str | None = None
     checkpoint_dir: str = "checkpoints"
 

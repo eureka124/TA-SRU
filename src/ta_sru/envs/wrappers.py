@@ -57,6 +57,10 @@ class IsaacLabWrapper:
     def training_curriculum_contact_scale(self) -> float:
         return self.env.training_curriculum_contact_scale
 
+    @property
+    def training_curriculum_contact_force_threshold(self) -> float:
+        return self.env.training_curriculum_contact_force_threshold
+
     def step(
         self, actions: np.ndarray | torch.Tensor
     ) -> tuple[

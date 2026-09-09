@@ -265,6 +265,9 @@ class NavigationEnv(DirectRLEnv):
         self.training_curriculum_maze_count = 1
         self.training_curriculum_cylinder_count = 0
         self.training_curriculum_contact_scale = 0.0
+        self.training_curriculum_contact_force_threshold = (
+            self.task.collision_force_threshold
+        )
         self._create_layout_tensors()
         self._create_toa_tensors()
         if self.task.debug:
@@ -573,12 +576,31 @@ class NavigationEnv(DirectRLEnv):
         simulated_steps = int(self.common_step_counter * self.num_envs)
         self.training_step_offset = int(elapsed_steps) - simulated_steps
 
+    def _contact_curriculum(self) -> tuple[float, float]:
+        """返回接触惩罚比例及碰撞重置共用的动态接触力阈值。"""
+
+        curriculum = min(
+            float(self.training_elapsed_steps)
+            / (
+                self.task.total_training_steps * self.task.contact_penalty_ramp_fraction
+            ),
+            1.0,
+        )
+        threshold = (
+            self.task.collision_force_threshold * (1.0 - curriculum)
+            + self.task.minimum_contact_force_threshold * curriculum
+        )
+        self.training_curriculum_contact_scale = curriculum
+        self.training_curriculum_contact_force_threshold = threshold
+        return curriculum, threshold
+
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         distance = torch.linalg.vector_norm(
             self.goal_positions[:, :2] - self.robot.data.root_pos_w[:, :2], dim=-1
         )
         success = distance <= self.task.goal_threshold
-        collided = self._contact_force() >= self.task.collision_force_threshold
+        _, contact_force_threshold = self._contact_curriculum()
+        collided = self._contact_force() >= contact_force_threshold
         local_xy = self.robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
         outside = torch.any(torch.abs(local_xy) > 19.5, dim=-1)
         time_out = self.episode_length_buf >= self.max_episode_length - 1
@@ -620,15 +642,10 @@ class NavigationEnv(DirectRLEnv):
         # 从而保证新回合第一次奖励不会与上一个回合做 TOA 差分。
         self.previous_toa.copy_(current_toa.detach())
 
-        curriculum = min(
-            float(self.training_elapsed_steps)
-            / (self.task.total_training_steps * self.task.contact_penalty_ramp_fraction),
-            1.0,
-        )
-        self.training_curriculum_contact_scale = curriculum
-        contact_penalty = (
-            self._contact_force() / self.task.collision_force_threshold
-        ).clamp(max=1.0) * curriculum
+        curriculum, contact_force_threshold = self._contact_curriculum()
+        contact_penalty = (self._contact_force() / contact_force_threshold).clamp(
+            max=1.0
+        ) * curriculum
         success = self.extras["success"].float()
         return (
             self.task.goal_velocity_weight * goal_velocity

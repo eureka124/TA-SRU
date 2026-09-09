@@ -107,6 +107,11 @@ class RecurrentPPO:
             "contact_penalty_scale": getattr(
                 self.env, "training_curriculum_contact_scale", 1.0
             ),
+            "contact_force_threshold": getattr(
+                self.env,
+                "training_curriculum_contact_force_threshold",
+                self.config.env.collision_force_threshold,
+            ),
             "cpu_buffer_mib": memory_mb,
         }
 

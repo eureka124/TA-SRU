@@ -66,6 +66,7 @@ class EnvConfig:
     goal_reached_weight: float = 300.0
     goal_threshold: float = 0.4
     collision_force_threshold: float = 50.0
+    minimum_contact_force_threshold: float = 0.1
     contact_penalty_ramp_fraction: float = 0.4
     total_training_steps: int = 70_000_000
 
@@ -107,6 +108,14 @@ class EnvConfig:
             raise ValueError("每个动作下界都必须小于上界")
         if not 0.0 < self.contact_penalty_ramp_fraction <= 1.0:
             raise ValueError("contact_penalty_ramp_fraction 必须位于 (0, 1]")
+        if (
+            not 0.0
+            < self.minimum_contact_force_threshold
+            <= self.collision_force_threshold
+        ):
+            raise ValueError(
+                "minimum_contact_force_threshold 必须为正数且不能大于 collision_force_threshold"
+            )
 
 
 @dataclass
@@ -171,7 +180,7 @@ class TrainConfig:
     total_timesteps: int = 70_000_000
     device: str = "cuda"
     log_interval: int = 1
-    checkpoint_interval: int = 5
+    checkpoint_interval: int = 10
     log_dir: str | None = None
     checkpoint_dir: str = "checkpoints"
 

@@ -75,6 +75,8 @@ class RecurrentPPO:
         self.recent_episode_returns: deque[float] = deque(maxlen=100)
         self.recent_episode_lengths: deque[int] = deque(maxlen=100)
         self.recent_episode_outcomes: deque[str] = deque(maxlen=100)
+        self.best_mean_reward = float("-inf")
+        self.best_mean_reward_step = 0
         self.progress_path = (
             Path(config.log_dir) / "progress.csv"
             if config.log_dir is not None
@@ -176,6 +178,7 @@ class RecurrentPPO:
             writer.add_scalar(
                 "rollout/ep_rew_mean", np.mean(self.recent_episode_returns), step
             )
+            writer.add_scalar("rollout/best_ep_rew_mean", self.best_mean_reward, step)
             writer.add_scalar(
                 "rollout/ep_len_mean", np.mean(self.recent_episode_lengths), step
             )
@@ -188,6 +191,20 @@ class RecurrentPPO:
             ):
                 writer.add_scalar(tag, outcome_rates[outcome], step)
         writer.flush()
+
+    def _save_best_model(self) -> tuple[Path, float] | None:
+        """最近 100 个已完成回合的平均回报创新高时保存模型。"""
+
+        if not self.recent_episode_returns:
+            return None
+        mean_reward = float(np.mean(self.recent_episode_returns))
+        if not np.isfinite(mean_reward) or mean_reward <= self.best_mean_reward:
+            return None
+        self.best_mean_reward = mean_reward
+        self.best_mean_reward_step = self.timesteps
+        checkpoint = Path(self.config.checkpoint_dir) / "model_best.pt"
+        self.save(checkpoint)
+        return checkpoint, mean_reward
 
     @torch.no_grad()
     def _terminal_value(
@@ -411,6 +428,13 @@ class RecurrentPPO:
                 progress_bar.update(current_timesteps - displayed_timesteps)
                 displayed_timesteps = current_timesteps
                 metrics = self.update()
+                best_model = self._save_best_model()
+                if best_model is not None:
+                    checkpoint, mean_reward = best_model
+                    progress_bar.write(
+                        f"最佳模型已保存：reward={mean_reward:.3f} "
+                        f"steps={self.timesteps} path={checkpoint}"
+                    )
                 if self.updates % self.config.log_interval == 0 or self.updates == 1:
                     memory_mb = self.buffer.memory_bytes / 1024**2
                     elapsed = max(time.perf_counter() - started_at, 1.0e-9)
@@ -460,6 +484,11 @@ class RecurrentPPO:
                 "optimizer": self.optimizer.state_dict(),
                 "timesteps": self.timesteps,
                 "updates": self.updates,
+                "best_mean_reward": self.best_mean_reward,
+                "best_mean_reward_step": self.best_mean_reward_step,
+                "recent_episode_returns": list(self.recent_episode_returns),
+                "recent_episode_lengths": list(self.recent_episode_lengths),
+                "recent_episode_outcomes": list(self.recent_episode_outcomes),
                 "config": asdict(self.config),
             },
             path,
@@ -472,6 +501,17 @@ class RecurrentPPO:
             self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.timesteps = int(checkpoint.get("timesteps", 0))
         self.updates = int(checkpoint.get("updates", 0))
+        self.best_mean_reward = float(checkpoint.get("best_mean_reward", float("-inf")))
+        self.best_mean_reward_step = int(checkpoint.get("best_mean_reward_step", 0))
+        self.recent_episode_returns.extend(
+            float(value) for value in checkpoint.get("recent_episode_returns", [])
+        )
+        self.recent_episode_lengths.extend(
+            int(value) for value in checkpoint.get("recent_episode_lengths", [])
+        )
+        self.recent_episode_outcomes.extend(
+            str(value) for value in checkpoint.get("recent_episode_outcomes", [])
+        )
         if hasattr(self.env, "set_training_progress"):
             self.env.set_training_progress(self.timesteps)
             # 构造训练器时环境已经按第 0 阶段 reset；恢复 checkpoint 后立即

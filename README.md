@@ -133,6 +133,10 @@ python scripts/train.py \
   --headless --device cuda:0
 ```
 
+训练器还会以最近 100 个已完成 episode 的平均回报 `rollout/ep_rew_mean` 作为评选
+指标。该指标创新高时覆盖保存 `checkpoints/model_best.pt`，并将历史最佳回报及其
+训练步数写入 checkpoint；恢复训练后会继续沿用原来的最佳阈值。
+
 已有 CSV 可用 `python scripts/progress_to_tensorboard.py runs/<运行名>/progress.csv`
 一次性回填到该运行的 TensorBoard 事件中。
 

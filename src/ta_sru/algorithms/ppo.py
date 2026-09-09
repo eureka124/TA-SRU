@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from collections import deque
 import csv
+import time
+from collections import deque
 from dataclasses import asdict
 from pathlib import Path
-import time
 from typing import Any
 
 import numpy as np
 import torch
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
+from tqdm.auto import tqdm
 
 from ta_sru.algorithms.buffer import CpuRolloutBuffer
 from ta_sru.config import TrainConfig
@@ -75,7 +76,9 @@ class RecurrentPPO:
         self.recent_episode_lengths: deque[int] = deque(maxlen=100)
         self.recent_episode_outcomes: deque[str] = deque(maxlen=100)
         self.progress_path = (
-            Path(config.log_dir) / "progress.csv" if config.log_dir is not None else None
+            Path(config.log_dir) / "progress.csv"
+            if config.log_dir is not None
+            else None
         )
         self.tensorboard_writer: SummaryWriter | None = None
 
@@ -143,7 +146,9 @@ class RecurrentPPO:
         # progress/* 与 progress.csv 的数值列一一对应。
         for name, value in self._progress_values(metrics, memory_mb).items():
             writer.add_scalar(f"progress/{name}", value, step)
-        writer.add_text("progress/recurrent_type", self.config.network.recurrent_type, step)
+        writer.add_text(
+            "progress/recurrent_type", self.config.network.recurrent_type, step
+        )
 
         # 保留旧 SB3 运行的 tag，方便在同一 TensorBoard 中对比。
         legacy_metrics = {
@@ -157,14 +162,10 @@ class RecurrentPPO:
                 else 0.0
             ),
             "train/entropy_loss": -metrics.get("entropy", float("nan")),
-            "train/explained_variance": metrics.get(
-                "explained_variance", float("nan")
-            ),
+            "train/explained_variance": metrics.get("explained_variance", float("nan")),
             "train/learning_rate": metrics.get("learning_rate", float("nan")),
             "train/loss": metrics.get("loss", float("nan")),
-            "train/policy_gradient_loss": metrics.get(
-                "policy_loss", float("nan")
-            ),
+            "train/policy_gradient_loss": metrics.get("policy_loss", float("nan")),
             "train/std": metrics.get("std", float("nan")),
             "train/value_loss": metrics.get("value_loss", float("nan")),
         }
@@ -190,7 +191,10 @@ class RecurrentPPO:
 
     @torch.no_grad()
     def _terminal_value(
-        self, terminal_observation: dict[str, np.ndarray], env_id: int, next_state: RecurrentState
+        self,
+        terminal_observation: dict[str, np.ndarray],
+        env_id: int,
+        next_state: RecurrentState,
     ) -> float:
         observation = {
             key: torch.as_tensor(value[None], dtype=torch.float32, device=self.device)
@@ -268,11 +272,15 @@ class RecurrentPPO:
             self.timesteps += self.env.num_envs
 
         with torch.no_grad():
-            last_values = self.policy.predict_value(
-                _observation_tensor(self.observation, self.device),
-                self.recurrent_state.critic,
-                torch.as_tensor(self.episode_starts, device=self.device),
-            ).cpu().numpy()
+            last_values = (
+                self.policy.predict_value(
+                    _observation_tensor(self.observation, self.device),
+                    self.recurrent_state.critic,
+                    torch.as_tensor(self.episode_starts, device=self.device),
+                )
+                .cpu()
+                .numpy()
+            )
         self.buffer.compute_returns_and_advantages(last_values, final_dones)
 
     def update(self) -> dict[str, float]:
@@ -336,9 +344,9 @@ class RecurrentPPO:
 
                 with torch.no_grad():
                     log_ratio = log_probability - batch.old_log_probabilities
-                    approximate_kl = (
-                        (torch.exp(log_ratio) - 1.0 - log_ratio)[mask].mean()
-                    )
+                    approximate_kl = (torch.exp(log_ratio) - 1.0 - log_ratio)[
+                        mask
+                    ].mean()
                     clip_fraction = (
                         (torch.abs(ratio - 1.0) > self.config.ppo.clip_range)[mask]
                         .float()
@@ -382,11 +390,26 @@ class RecurrentPPO:
         target = total_timesteps or self.config.total_timesteps
         started_at = time.perf_counter()
         starting_timesteps = self.timesteps
+        displayed_timesteps = min(self.timesteps, target)
+        progress_bar = tqdm(
+            total=target,
+            initial=displayed_timesteps,
+            desc="训练进度",
+            unit="步",
+            dynamic_ncols=True,
+            bar_format=(
+                "{desc}: {percentage:3.0f}%|{bar}| "
+                "{n_fmt}/{total_fmt} 步 [{elapsed}<{remaining}, {rate_fmt}]"
+            ),
+        )
         if self.config.log_dir is not None:
             self.tensorboard_writer = SummaryWriter(log_dir=self.config.log_dir)
         try:
             while self.timesteps < target:
                 self.collect_rollout()
+                current_timesteps = min(self.timesteps, target)
+                progress_bar.update(current_timesteps - displayed_timesteps)
+                displayed_timesteps = current_timesteps
                 metrics = self.update()
                 if self.updates % self.config.log_interval == 0 or self.updates == 1:
                     memory_mb = self.buffer.memory_bytes / 1024**2
@@ -398,7 +421,7 @@ class RecurrentPPO:
                     success_rate = (
                         f"{outcome_rates['success']:.2%}" if outcome_rates else "N/A"
                     )
-                    print(
+                    progress_bar.write(
                         f"recurrent={self.config.network.recurrent_type} "
                         f"update={self.updates} steps={self.timesteps} "
                         f"policy_loss={metrics.get('policy_loss', float('nan')):.4f} "
@@ -421,6 +444,9 @@ class RecurrentPPO:
                     )
                     self.save(checkpoint)
         finally:
+            current_timesteps = min(self.timesteps, target)
+            progress_bar.update(current_timesteps - displayed_timesteps)
+            progress_bar.close()
             if self.tensorboard_writer is not None:
                 self.tensorboard_writer.close()
                 self.tensorboard_writer = None

@@ -182,6 +182,7 @@ class IsaacNavigationEnvCfg(DirectRLEnvCfg):
     }
     state_space = 0
     sim = SimulationCfg(dt=1.0 / 120.0, render_interval=decimation)
+    sim.physx.enable_external_forces_every_iteration = True
     sim.physx.gpu_found_lost_pairs_capacity = 2**23
     scene = NavigationSceneCfg(
         num_envs=4,

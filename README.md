@@ -116,6 +116,9 @@ TensorBoard 事件文件。其中既有与 CSV 列对应的 `progress/*`，也�
 `rollout/*`、`train/*`、`time/fps` 和 `Metrics/*` 等旧 SB3 实验标签。可用
 `--log-interval N` 改为每 N 次更新记录，并使用以下命令查看：
 
+训练期间终端会持续显示“已训练步数/总训练步数”进度条；从 checkpoint 恢复时，
+进度条会从 checkpoint 保存的训练步数继续累计。
+
 ```bash
 tensorboard --logdir runs
 ```
@@ -133,7 +136,27 @@ tensorboard --logdir runs
 | `lstm` | 原生 `torch.nn.LSTM` |
 
 每次运行会创建 `runs/<循环单元>_<时间戳>/`，其中包含 `config.json`、`command.txt`、
-`progress.csv` 和 `checkpoints/`。例如：
+`commit_id.txt`、`diff.patch`、`progress.csv` 和 `checkpoints/`。`commit_id.txt` 记录
+训练代码对应的基准提交，`diff.patch` 记录工作区相对该提交的改动；默认使用当前
+`HEAD` 并自动执行 `git diff HEAD`。
+
+也可以归档预先生成的 patch。推荐同时显式传入对应提交：
+
+```bash
+commit_id=$(git rev-parse HEAD)
+diff_file="/tmp/diff_${commit_id}.patch"
+git diff "$commit_id" > "$diff_file"
+python scripts/train.py \
+  --run-name "maze-${commit_id}" \
+  --commit-id "$commit_id" \
+  --diff-file "$diff_file" \
+  --headless --device cuda:0
+```
+
+`--diff_file` 是与教程命令兼容的别名。若未传 `--commit-id`，程序会优先从
+`diff_<提交ID>.patch` 文件名识别基准提交，否则使用启动训练时的 `HEAD`。
+
+训练目录示例：
 
 ```text
 runs/sru-lstm-gate_20260903-153000/

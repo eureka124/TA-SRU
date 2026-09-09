@@ -36,11 +36,11 @@ class EnvConfig:
         0.0,
         0.10,
         0.20,
-        0.35,
+        0.40,
         0.50,
     )
-    training_curriculum_maze_counts: tuple[int, ...] = (1, 6, 6, 6, 6)
-    training_curriculum_cylinder_counts: tuple[int, ...] = (0, 0, 10, 30, 60)
+    training_curriculum_maze_counts: tuple[int, ...] = (3, 4, 5, 5, 6)
+    training_curriculum_cylinder_counts: tuple[int, ...] = (10, 10, 10, 30, 60)
 
     depth_height: int = 12
     depth_width: int = 16
@@ -138,7 +138,7 @@ class PPOConfig:
     """Recurrent PPO 超参数，与旧工程当前训练配置对齐。"""
 
     rollout_steps: int = 128
-    batch_size: int = 512
+    batch_size: int = 128
     recurrent_sequence_length: int = 64
     epochs: int = 5
     gamma: float = 0.99

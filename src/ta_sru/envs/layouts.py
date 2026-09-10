@@ -10,6 +10,7 @@ from math import pi
 class Wall:
     center_xy: tuple[float, float]
     vertical: bool = False
+    length_scale: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -26,8 +27,12 @@ def _point(point: tuple[float, float]) -> tuple[float, float]:
     return point[0] * _SCALE, point[1] * _SCALE
 
 
-def _wall(x: float, y: float, yaw: float = 0.0) -> Wall:
-    return Wall(_point((x, y)), vertical=abs(abs(yaw) - pi / 2) < 1.0e-6)
+def _wall(x: float, y: float, yaw: float = 0.0, length_scale: float = 1.0) -> Wall:
+    return Wall(
+        _point((x, y)),
+        vertical=abs(abs(yaw) - pi / 2) < 1.0e-6,
+        length_scale=length_scale,
+    )
 
 
 def _routes(*routes):
@@ -52,7 +57,11 @@ MAZE_LAYOUTS = (
     ),
     MazeLayout(
         "maze_04",
-        (_wall(0.0, 1.8), _wall(-3.0, -1.2, pi / 2), _wall(3.0, -1.2, pi / 2)),
+        (
+            _wall(0.0, 1.8),
+            _wall(-3.0, -1.2, pi / 2, length_scale=0.5),
+            _wall(3.0, -1.2, pi / 2, length_scale=0.5),
+        ),
         _routes(((-1.2, -1.2), (-1.2, 6.0)), ((1.2, -1.2), (1.2, 6.0))),
     ),
     MazeLayout(
@@ -73,9 +82,11 @@ def wall_rectangle(
 ) -> tuple[float, float, float, float]:
     """返回 ``center_x, center_y, size_x, size_y``。"""
 
-    size_x, size_y = (wall_thickness, wall_length) if wall.vertical else (
-        wall_length,
-        wall_thickness,
+    scaled_length = wall_length * wall.length_scale
+    size_x, size_y = (
+        (wall_thickness, scaled_length)
+        if wall.vertical
+        else (scaled_length, wall_thickness)
     )
     return wall.center_xy[0], wall.center_xy[1], size_x, size_y
 
@@ -91,6 +102,8 @@ def validate_layouts(
         if len(layout.walls) > 3 or len(layout.routes) != 2:
             raise ValueError(f"{layout.name} 的墙体或路线数量不正确")
         for wall in layout.walls:
+            if wall.length_scale <= 0.0:
+                raise ValueError(f"{layout.name} 的墙体长度比例必须为正数")
             x, y, size_x, size_y = wall_rectangle(wall, wall_thickness, wall_length)
             if abs(x) + size_x / 2 >= arena_half_extent:
                 raise ValueError(f"{layout.name} 的墙体越过 X 边界")
@@ -99,4 +112,3 @@ def validate_layouts(
 
 
 validate_layouts()
-

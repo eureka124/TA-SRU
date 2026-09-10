@@ -38,7 +38,8 @@ from ta_sru.models.hummingbird_asset import HUMMINGBIRD_CFG
 from ta_sru.models.lee_controller import LeePositionController
 
 
-MAX_INNER_WALLS = 3
+INNER_WALL_LENGTH_SCALES = (1.0, 1.0, 1.0, 0.5, 0.5)
+MAX_INNER_WALLS = len(INNER_WALL_LENGTH_SCALES)
 MAX_RANDOM_CYLINDERS = 60
 CYLINDER_VARIANTS = ((0.30, 2.5), (0.45, 3.2), (0.60, 4.0))
 TRAJECTORY_MAX_POINTS = 512
@@ -107,6 +108,16 @@ class NavigationSceneCfg(InteractiveSceneCfg):
     inner_wall_2 = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/InnerWall_2",
         spawn=_fixed_cuboid((12.0, 0.7, 4.0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -10.0)),
+    )
+    inner_wall_3 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/InnerWall_3",
+        spawn=_fixed_cuboid((6.0, 0.7, 4.0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -10.0)),
+    )
+    inner_wall_4 = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/InnerWall_4",
+        spawn=_fixed_cuboid((6.0, 0.7, 4.0)),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -10.0)),
     )
     random_cylinders = RigidObjectCollectionCfg(
@@ -224,6 +235,13 @@ def make_isaac_env_cfg(task: EnvConfig, sim_device: str) -> IsaacNavigationEnvCf
     }
     cfg.scene.camera.pattern_cfg.height = task.depth_height * 4
     cfg.scene.camera.pattern_cfg.width = task.depth_width * 4
+    for wall_id, length_scale in enumerate(INNER_WALL_LENGTH_SCALES):
+        wall_cfg = getattr(cfg.scene, f"inner_wall_{wall_id}")
+        wall_cfg.spawn.size = (
+            task.inner_wall_length * length_scale,
+            task.wall_thickness,
+            task.arena_height,
+        )
     cfg.scene.random_cylinders.rigid_objects = dict(
         list(cfg.scene.random_cylinders.rigid_objects.items())[: task.random_cylinder_count]
     )
@@ -292,14 +310,25 @@ class NavigationEnv(DirectRLEnv):
         layout_count = len(MAZE_LAYOUTS)
         self.wall_xy = torch.zeros((layout_count, MAX_INNER_WALLS, 2), device=self.device)
         self.wall_yaw = torch.zeros((layout_count, MAX_INNER_WALLS), device=self.device)
+        self.wall_length = torch.tensor(
+            INNER_WALL_LENGTH_SCALES, device=self.device
+        ).repeat(layout_count, 1)
+        self.wall_length *= self.task.inner_wall_length
         self.wall_active = torch.zeros(
             (layout_count, MAX_INNER_WALLS), dtype=torch.bool, device=self.device
         )
         self.route_starts = torch.zeros((layout_count, 2, 2), device=self.device)
         self.route_goals = torch.zeros_like(self.route_starts)
         for layout_id, layout in enumerate(MAZE_LAYOUTS):
-            for wall_id, wall in enumerate(layout.walls):
-                self.wall_xy[layout_id, wall_id] = torch.tensor(wall.center_xy, device=self.device)
+            next_slot = {1.0: 0, 0.5: 3}
+            for wall in layout.walls:
+                if wall.length_scale not in next_slot:
+                    raise ValueError(f"不支持的墙体长度比例：{wall.length_scale}")
+                wall_id = next_slot[wall.length_scale]
+                next_slot[wall.length_scale] += 1
+                self.wall_xy[layout_id, wall_id] = torch.tensor(
+                    wall.center_xy, device=self.device
+                )
                 self.wall_yaw[layout_id, wall_id] = np.pi / 2 if wall.vertical else 0.0
                 self.wall_active[layout_id, wall_id] = True
             for route_id, (start, goal) in enumerate(layout.routes):
@@ -669,6 +698,7 @@ class NavigationEnv(DirectRLEnv):
         goal_xy: torch.Tensor,
         selected_wall_xy: torch.Tensor,
         selected_wall_yaw: torch.Tensor,
+        selected_wall_length: torch.Tensor,
         selected_wall_active: torch.Tensor,
         cylinder_count: int,
     ) -> torch.Tensor:
@@ -684,8 +714,12 @@ class NavigationEnv(DirectRLEnv):
             atol=1.0e-6,
             rtol=0.0,
         )
-        half_x = torch.where(vertical, self.task.wall_thickness / 2, self.task.inner_wall_length / 2)
-        half_y = torch.where(vertical, self.task.inner_wall_length / 2, self.task.wall_thickness / 2)
+        half_x = torch.where(
+            vertical, self.task.wall_thickness / 2, selected_wall_length / 2
+        )
+        half_y = torch.where(
+            vertical, selected_wall_length / 2, self.task.wall_thickness / 2
+        )
         for cylinder_id in range(cylinder_count):
             radius = self.cylinder_radii[cylinder_id]
             limit = self.task.arena_half_extent - self.task.wall_thickness / 2 - radius - 0.35
@@ -775,6 +809,7 @@ class NavigationEnv(DirectRLEnv):
 
         selected_xy = self.wall_xy[maze_ids]
         selected_yaw = self.wall_yaw[maze_ids]
+        selected_length = self.wall_length[maze_ids]
         selected_active = self.wall_active[maze_ids]
         for wall_id, wall in enumerate(self.inner_walls):
             pose = wall.data.default_root_state[env_ids, :7].clone()
@@ -790,6 +825,7 @@ class NavigationEnv(DirectRLEnv):
             goal_xy,
             selected_xy,
             selected_yaw,
+            selected_length,
             selected_active,
             active_cylinder_count,
         )

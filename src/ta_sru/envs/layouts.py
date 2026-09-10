@@ -62,7 +62,7 @@ MAZE_LAYOUTS = (
             _wall(-3.0, -1.2, pi / 2, length_scale=0.5),
             _wall(3.0, -1.2, pi / 2, length_scale=0.5),
         ),
-        _routes(((-1.2, -1.2), (-1.2, 6.0)), ((1.2, -1.2), (1.2, 6.0))),
+        _routes(((-1.2, -3.0), (-1.2, 6.0)), ((1.2, -3.0), (1.2, 6.0))),
     ),
     MazeLayout(
         "maze_05",
@@ -77,17 +77,11 @@ MAZE_LAYOUTS = (
 )
 
 
-def wall_rectangle(
-    wall: Wall, wall_thickness: float, wall_length: float
-) -> tuple[float, float, float, float]:
+def wall_rectangle(wall: Wall, wall_thickness: float, wall_length: float) -> tuple[float, float, float, float]:
     """返回 ``center_x, center_y, size_x, size_y``。"""
 
     scaled_length = wall_length * wall.length_scale
-    size_x, size_y = (
-        (wall_thickness, scaled_length)
-        if wall.vertical
-        else (scaled_length, wall_thickness)
-    )
+    size_x, size_y = (wall_thickness, scaled_length) if wall.vertical else (scaled_length, wall_thickness)
     return wall.center_xy[0], wall.center_xy[1], size_x, size_y
 
 

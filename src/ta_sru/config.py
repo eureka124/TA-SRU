@@ -43,20 +43,15 @@ class EnvConfig:
     # 构建 TOA 障碍膨胀区域时采用的无人机半径，单位为米。
     drone_radius: float = 0.4
 
-    # 难度课程与参考 training_mazes 一致：先学习简单单墙迷宫，再启用全部
-    # 六种墙体布局，之后逐步增加随机圆柱。数量表示已生成圆柱槽位的活动前缀。
+    # 先进行混合迷宫训练，再集中训练第四种 U 形墙壁布局，最后恢复六种混合迷宫。
     # 各课程阶段相对于总训练步数的起始比例。
-    training_curriculum_stage_fractions: tuple[float, ...] = (
-        0.0,
-        0.10,
-        0.20,
-        0.40,
-        0.50,
-    )
+    training_curriculum_stage_fractions: tuple[float, ...] = (0.0, 0.10, 0.20, 0.40, 0.50, 0.60, 0.95)
     # 各课程阶段启用的迷宫布局数量。
-    training_curriculum_maze_counts: tuple[int, ...] = (6, 4, 5, 5, 6)
+    training_curriculum_maze_counts: tuple[int, ...] = (3, 4, 5, 5, 6, 1, 6)
+    # 各阶段连续启用的迷宫起始索引，从 0 开始；索引 3 对应第四种 U 形布局。
+    training_curriculum_maze_start_indices: tuple[int, ...] = (0, 0, 0, 0, 0, 3, 0)
     # 各课程阶段启用的随机圆柱数量。
-    training_curriculum_cylinder_counts: tuple[int, ...] = (10, 10, 10, 30, 60)
+    training_curriculum_cylinder_counts: tuple[int, ...] = (10, 10, 10, 30, 60, 60, 60)
 
     # 输入网络的下采样深度图高度，单位为像素。
     depth_height: int = 12
@@ -137,9 +132,18 @@ class EnvConfig:
             stage_fractions=self.training_curriculum_stage_fractions,
             maze_counts=self.training_curriculum_maze_counts,
             cylinder_counts=self.training_curriculum_cylinder_counts,
+            maze_start_indices=self.training_curriculum_maze_start_indices,
         )
         if any(count > 6 for count in self.training_curriculum_maze_counts):
             raise ValueError("课程阶段启用的迷宫数量不能超过 6")
+        if any(
+            start + count > 6
+            for start, count in zip(
+                self.training_curriculum_maze_start_indices,
+                self.training_curriculum_maze_counts,
+            )
+        ):
+            raise ValueError("课程阶段启用的迷宫索引范围不能超过六种布局")
         if any(count > 60 for count in self.training_curriculum_cylinder_counts):
             raise ValueError("课程阶段启用的圆柱数量不能超过 60")
         if any(low >= high for low, high in zip(self.action_low, self.action_high)):

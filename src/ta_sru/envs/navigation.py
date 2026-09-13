@@ -776,16 +776,19 @@ class NavigationEnv(DirectRLEnv):
             stage_fractions=self.task.training_curriculum_stage_fractions,
             maze_counts=self.task.training_curriculum_maze_counts,
             cylinder_counts=self.task.training_curriculum_cylinder_counts,
+            maze_start_indices=self.task.training_curriculum_maze_start_indices,
         )
-        # --cylinders 可以减少实际创建的槽位；课程数量相应封顶，但默认 60
-        # 个槽位时与参考任务的 0/0/10/30/60 调度完全一致。
+        # --cylinders 可以减少实际创建的槽位，课程数量相应封顶。
         active_cylinder_count = min(
             curriculum_stage.cylinder_count, self.task.random_cylinder_count
         )
         self.training_curriculum_stage = curriculum_stage.index
         self.training_curriculum_maze_count = curriculum_stage.maze_count
         self.training_curriculum_cylinder_count = active_cylinder_count
-        maze_ids = torch.remainder(env_ids, curriculum_stage.maze_count)
+        maze_ids = (
+            torch.remainder(env_ids, curriculum_stage.maze_count)
+            + curriculum_stage.maze_start_index
+        )
         route_ids = torch.randint(0, 2, (count,), device=self.device)
         reversed_direction = torch.rand(count, device=self.device) < 0.5
         starts = self.route_starts[maze_ids, route_ids]

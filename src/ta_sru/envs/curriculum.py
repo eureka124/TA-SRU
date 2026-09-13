@@ -15,6 +15,7 @@ class TrainingMazeCurriculumStage:
     start_fraction: float
     maze_count: int
     cylinder_count: int
+    maze_start_index: int = 0
 
 
 def select_training_maze_curriculum_stage(
@@ -23,6 +24,7 @@ def select_training_maze_curriculum_stage(
     stage_fractions: Sequence[float],
     maze_counts: Sequence[int],
     cylinder_counts: Sequence[int],
+    maze_start_indices: Sequence[int] | None = None,
 ) -> TrainingMazeCurriculumStage:
     """根据累计环境 transition 数选择当前课程阶段。"""
 
@@ -32,6 +34,12 @@ def select_training_maze_curriculum_stage(
         raise ValueError("课程阶段比例、迷宫数量和圆柱数量必须具有相同长度")
     if not stage_fractions:
         raise ValueError("至少需要一个课程阶段")
+    if maze_start_indices is None:
+        maze_start_indices = (0,) * len(stage_fractions)
+    if len(maze_start_indices) != len(stage_fractions):
+        raise ValueError("课程阶段的迷宫起始索引数量必须与阶段数量一致")
+    if any(index < 0 for index in maze_start_indices):
+        raise ValueError("课程阶段的迷宫起始索引不能为负数")
     if stage_fractions[0] != 0.0:
         raise ValueError("第一个课程阶段必须从 0.0 开始")
     if any(current <= previous for previous, current in zip(stage_fractions, stage_fractions[1:])):
@@ -50,6 +58,7 @@ def select_training_maze_curriculum_stage(
         start_fraction=float(stage_fractions[stage_index]),
         maze_count=int(maze_counts[stage_index]),
         cylinder_count=int(cylinder_counts[stage_index]),
+        maze_start_index=int(maze_start_indices[stage_index]),
     )
 
 

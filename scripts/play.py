@@ -60,6 +60,13 @@ def main() -> int:
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
         values = checkpoint["config"]
         env_values = dict(values["env"])
+        # 旧 checkpoint 的每个阶段都从第一种迷宫开始，按原阶段数量补齐索引。
+        if "training_curriculum_maze_start_indices" not in env_values:
+            stage_fractions = env_values.get("training_curriculum_stage_fractions")
+            if stage_fractions is not None:
+                env_values["training_curriculum_maze_start_indices"] = (0,) * len(
+                    stage_fractions
+                )
         env_values["num_envs"] = args.num_envs
         ppo_values = dict(values["ppo"])
         rollout_sample_count = int(ppo_values["rollout_steps"]) * args.num_envs

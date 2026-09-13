@@ -59,8 +59,8 @@ MAZE_LAYOUTS = (
         "maze_04",
         (
             _wall(0.0, 1.8),
-            _wall(-3.0, -1.2, pi / 2, length_scale=0.5),
-            _wall(3.0, -1.2, pi / 2, length_scale=0.5),
+            _wall(-3.0, 0.3, pi / 2, length_scale=0.5),
+            _wall(3.0, 0.3, pi / 2, length_scale=0.5),
         ),
         _routes(((-1.2, -3.0), (-1.2, 6.0)), ((1.2, -3.0), (1.2, 6.0))),
     ),

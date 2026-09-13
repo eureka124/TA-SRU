@@ -46,6 +46,32 @@ TRAJECTORY_MAX_POINTS = 512
 TRAJECTORY_POINT_SPACING = 0.15
 
 
+def _camera_mesh_targets(
+    cylinder_count: int,
+) -> list[MultiMeshRayCasterCameraCfg.RaycastTargetCfg]:
+    """逐槽位配置相机网格，使克隆环境能够命中共享网格缓存。"""
+
+    # 同一表达式匹配多个同形障碍物时，Isaac Lab 的去重分支可能不缓存别名，
+    # 导致后续环境重复解析网格；只对环境编号使用通配符。
+    names = (
+        "Floor",
+        "BoundaryNorth",
+        "BoundarySouth",
+        "BoundaryEast",
+        "BoundaryWest",
+        *(f"InnerWall_{index}" for index in range(MAX_INNER_WALLS)),
+        *(f"RandomCylinder_{index:02d}" for index in range(cylinder_count)),
+    )
+    return [
+        MultiMeshRayCasterCameraCfg.RaycastTargetCfg(
+            prim_expr=f"{{ENV_REGEX_NS}}/{name}",
+            is_shared=True,
+            track_mesh_transforms=True,
+        )
+        for name in names
+    ]
+
+
 def _fixed_cuboid(size: tuple[float, float, float]) -> sim_utils.CuboidCfg:
     return sim_utils.CuboidCfg(
         size=size,
@@ -133,22 +159,7 @@ class NavigationSceneCfg(InteractiveSceneCfg):
     camera = MultiMeshRayCasterCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base_link",
         update_period=0.04,
-        mesh_prim_paths=[
-            MultiMeshRayCasterCameraCfg.RaycastTargetCfg(
-                prim_expr=f"{{ENV_REGEX_NS}}/{name}",
-                is_shared=True,
-                track_mesh_transforms=True,
-            )
-            for name in (
-                "Floor",
-                "BoundaryNorth",
-                "BoundarySouth",
-                "BoundaryEast",
-                "BoundaryWest",
-                "InnerWall_.*",
-                "RandomCylinder_.*",
-            )
-        ],
+        mesh_prim_paths=_camera_mesh_targets(MAX_RANDOM_CYLINDERS),
         data_types=["distance_to_image_plane"],
         max_distance=12.0,
         depth_clipping_behavior="max",
@@ -245,6 +256,8 @@ def make_isaac_env_cfg(task: EnvConfig, sim_device: str) -> IsaacNavigationEnvCf
     cfg.scene.random_cylinders.rigid_objects = dict(
         list(cfg.scene.random_cylinders.rigid_objects.items())[: task.random_cylinder_count]
     )
+    # 相机目标与实际生成的圆柱保持一致，避免减少数量后匹配到不存在的路径。
+    cfg.scene.camera.mesh_prim_paths = _camera_mesh_targets(task.random_cylinder_count)
     return cfg
 
 

@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="显示目标、速度和轨迹标记，并保存六种迷宫的全局 TOA 图",
+        help="显示导航标记，保存 TOA 图、原始深度视频和动作/状态/俯视轨迹 HTML 回放",
     )
     AppLauncher.add_app_launcher_args(parser)
     return parser.parse_args()
@@ -46,6 +46,7 @@ def main() -> int:
     stage = "启动 Isaac Sim"
     simulation_app = None
     env = None
+    debug_recorder = None
     exit_code = 0
     try:
         simulation_app = AppLauncher(args).app
@@ -57,7 +58,7 @@ def main() -> int:
 
         stage = "读取 checkpoint"
         checkpoint_path = Path(args.checkpoint).resolve()
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         values = checkpoint["config"]
         env_values = dict(values["env"])
         # 旧 checkpoint 的每个阶段都从第一种迷宫开始，按原阶段数量补齐索引。
@@ -91,6 +92,7 @@ def main() -> int:
         config = TrainConfig(
             env=EnvConfig(**env_values),
             network=NetworkConfig(**values["network"]),
+            algorithm=values.get("algorithm", "recurrent_ppo"),
             ppo=PPOConfig(**ppo_values),
             total_timesteps=values["total_timesteps"],
             device=args.network_device or args.device,
@@ -107,6 +109,17 @@ def main() -> int:
         agent = RecurrentPPO(env, config)
         agent.load(args.checkpoint, load_optimizer=False)
         observation, _ = env.reset()
+        if args.debug:
+            from ta_sru.debug.playback import PlayDebugRecorder
+
+            debug_recorder = PlayDebugRecorder(
+                config.env.debug_output_dir, config.env.policy_dt
+            )
+            env.env.play_debug_recorder = debug_recorder
+            print(
+                f"[DEBUG] 回放索引：{debug_recorder.output_dir / 'index.html'}",
+                flush=True,
+            )
         state = agent.policy.initial_state(env.num_envs)
         episode_starts = np.ones(env.num_envs, dtype=bool)
         outcomes = {"success": 0, "collision": 0, "timeout": 0}
@@ -114,6 +127,8 @@ def main() -> int:
         stage = "执行策略推理"
         agent.policy.eval()
         for _ in range(args.steps):
+            if not simulation_app.is_running():
+                break
             tensor_observation = {
                 key: torch.as_tensor(value, dtype=torch.float32, device=agent.device)
                 for key, value in observation.items()
@@ -124,6 +139,8 @@ def main() -> int:
                 torch.as_tensor(episode_starts, device=agent.device),
                 deterministic=True,
             )
+            if debug_recorder is not None:
+                debug_recorder.begin_step(env.env, action)
             observation, _, terminated, truncated, infos = env.step(action)
             episode_starts = terminated | truncated
             for env_id in np.flatnonzero(episode_starts):
@@ -134,11 +151,20 @@ def main() -> int:
                 else:
                     outcomes["timeout"] += 1
         print(f"运行结束：{outcomes}")
+    except KeyboardInterrupt:
+        print("\n评估已中断，正在保存未结束回合的调试回放。", flush=True)
+        exit_code = 130
     # 评估入口必须截获所有常规异常，确保 Isaac Sim 关闭前输出完整调用栈。
     except Exception as error:  # noqa: BLE001
         _print_error(stage, error)
         exit_code = 1
     finally:
+        if debug_recorder is not None:
+            try:
+                debug_recorder.close()
+            except Exception as error:  # noqa: BLE001
+                _print_error("保存调试回放", error)
+                exit_code = 1
         if env is not None:
             try:
                 env.close()

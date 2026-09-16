@@ -55,9 +55,7 @@ class CpuRolloutBuffer:
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.observations = {
-            key: np.empty(
-                (rollout_steps, num_envs, *value.shape[1:]), dtype=np.float32
-            )
+            key: np.empty((rollout_steps, num_envs, *value.shape[1:]), dtype=np.float32)
             for key, value in observation_example.items()
         }
         self.actions = np.empty((rollout_steps, num_envs, 3), dtype=np.float32)
@@ -126,7 +124,9 @@ class CpuRolloutBuffer:
                 next_non_terminal = 1.0 - last_dones.astype(np.float32)
                 next_values = last_values
             else:
-                next_non_terminal = 1.0 - self.episode_starts[step + 1].astype(np.float32)
+                next_non_terminal = 1.0 - self.episode_starts[step + 1].astype(
+                    np.float32
+                )
                 next_values = self.values[step + 1]
             delta = (
                 self.rewards[step]
@@ -152,7 +152,9 @@ class CpuRolloutBuffer:
             for episode_start, episode_end in zip(boundaries[:-1], boundaries[1:]):
                 for start in range(episode_start, episode_end, maximum_length):
                     sequences.append(
-                        _Sequence(env_id, start, min(start + maximum_length, episode_end))
+                        _Sequence(
+                            env_id, start, min(start + maximum_length, episode_end)
+                        )
                     )
         return sequences
 
@@ -251,3 +253,24 @@ class CpuRolloutBuffer:
         ]
         return sum(array.nbytes for array in arrays)
 
+
+class CpuFeedForwardBuffer(CpuRolloutBuffer):
+    """普通 PPO 按 transition 随机采样；循环状态数组大小为零。"""
+
+    def __init__(
+        self,
+        rollout_steps,
+        num_envs,
+        observation_example,
+        recurrent_layers,
+        recurrent_hidden_size,
+        gamma,
+        gae_lambda,
+    ):
+        super().__init__(
+            rollout_steps, num_envs, observation_example, 0, 0, gamma, gae_lambda
+        )
+
+    def iterate_batches(self, batch_size, sequence_length, device, rng):
+        # 单步序列使所有 transition 独立洗牌，无填充、无跨步记忆。
+        yield from super().iterate_batches(batch_size, 1, device, rng)

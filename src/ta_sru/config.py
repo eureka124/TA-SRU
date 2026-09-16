@@ -8,7 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-RECURRENT_TYPES = ("sru-lstm", "sru-gru", "sru-lstm-gate", "lstm")
+RECURRENT_TYPES = ("sru-lstm", "sru-gru", "sru-lstm-gate", "lstm", "none")
+
+
+def normalize_recurrent_type(value: str) -> str:
+    return {"nn.lstm": "lstm"}.get(value.lower(), value.lower().replace("_", "-"))
 
 
 @dataclass
@@ -45,7 +49,15 @@ class EnvConfig:
 
     # 先进行混合迷宫训练，再集中训练第四种 U 形墙壁布局，最后恢复六种混合迷宫。
     # 各课程阶段相对于总训练步数的起始比例。
-    training_curriculum_stage_fractions: tuple[float, ...] = (0.0, 0.10, 0.20, 0.40, 0.50, 0.60, 0.95)
+    training_curriculum_stage_fractions: tuple[float, ...] = (
+        0.0,
+        0.10,
+        0.20,
+        0.40,
+        0.50,
+        0.60,
+        0.95,
+    )
     # 各课程阶段启用的迷宫布局数量。
     training_curriculum_maze_counts: tuple[int, ...] = (3, 4, 5, 5, 6, 1, 6)
     # 各阶段连续启用的迷宫起始索引，从 0 开始；索引 3 对应第四种 U 形布局。
@@ -150,8 +162,14 @@ class EnvConfig:
             raise ValueError("每个动作下界都必须小于上界")
         if not 0.0 < self.contact_penalty_ramp_fraction <= 1.0:
             raise ValueError("contact_penalty_ramp_fraction 必须位于 (0, 1]")
-        if not 0.0 < self.minimum_contact_force_threshold <= self.collision_force_threshold:
-            raise ValueError("minimum_contact_force_threshold 必须为正数且不能大于 collision_force_threshold")
+        if (
+            not 0.0
+            < self.minimum_contact_force_threshold
+            <= self.collision_force_threshold
+        ):
+            raise ValueError(
+                "minimum_contact_force_threshold 必须为正数且不能大于 collision_force_threshold"
+            )
 
 
 @dataclass
@@ -176,6 +194,7 @@ class NetworkConfig:
     share_depth_encoder: bool = False
 
     def validate(self) -> None:
+        self.recurrent_type = normalize_recurrent_type(self.recurrent_type)
         if self.recurrent_type not in RECURRENT_TYPES:
             choices = ", ".join(RECURRENT_TYPES)
             raise ValueError(f"recurrent_type 必须是以下值之一：{choices}")
@@ -237,6 +256,8 @@ class TrainConfig:
     network: NetworkConfig = field(default_factory=NetworkConfig)
     # Recurrent PPO 算法超参数配置。
     ppo: PPOConfig = field(default_factory=PPOConfig)
+    # 缺省值保证旧循环 checkpoint 保持兼容。
+    algorithm: str = "recurrent_ppo"
     # 整个训练任务计划采集的 transition 总数。
     total_timesteps: int = 70_000_000
     # 模型与训练张量所在的计算设备。
@@ -259,4 +280,10 @@ class TrainConfig:
         self.env.total_training_steps = self.total_timesteps
         self.env.validate()
         self.network.validate()
+        if self.algorithm not in ("ppo", "recurrent_ppo"):
+            raise ValueError("algorithm 必须是 ppo 或 recurrent_ppo")
+        if (self.algorithm == "ppo") != (self.network.recurrent_type == "none"):
+            raise ValueError(
+                "普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元"
+            )
         self.ppo.validate(self.env.num_envs)

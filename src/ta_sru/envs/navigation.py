@@ -273,6 +273,8 @@ class NavigationEnv(DirectRLEnv):
         render_mode: str | None = None,
     ) -> None:
         self.task = task_config
+        # 仅由评估入口安装记录器，训练时不采集视频或回放数据。
+        self.play_debug_recorder = None
         super().__init__(cfg, render_mode=render_mode)
 
         self.parameters = HummingbirdParameters()
@@ -662,6 +664,9 @@ class NavigationEnv(DirectRLEnv):
             }
         else:
             self.extras["terminal_observation"] = None
+        if self.play_debug_recorder is not None:
+            # DirectRLEnv 随后会自动重置，必须在这里保存终止帧和真实末端位置。
+            self.play_debug_recorder.capture(self, terminated | time_out)
         return terminated, time_out
 
     def _get_rewards(self) -> torch.Tensor:

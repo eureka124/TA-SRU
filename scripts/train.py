@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Isaac Lab 2.3.2 需要先加载 Conda 环境中的新版 Warp。
+import torch
 import warp  # noqa: F401
 from isaaclab.app import AppLauncher
 
@@ -23,6 +24,7 @@ RECURRENT_TYPES = ("sru-lstm", "sru-gru", "sru-lstm-gate", "lstm")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="训练 Hummingbird 迷宫导航策略")
+    parser.add_argument("--algorithm", choices=("ppo", "recurrent_ppo"), default=None)
     parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument("--total-timesteps", type=int, default=70_000_000)
     parser.add_argument("--rollout-steps", type=int, default=512)
@@ -30,8 +32,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sequence-length", type=int, default=64)
     parser.add_argument(
         "--recurrent-type",
+        type=lambda value: {"nn.lstm": "lstm"}.get(value, value.replace("_", "-")),
         choices=RECURRENT_TYPES,
-        default="sru-lstm",
+        default=None,
         help="循环单元；lstm 表示 torch.nn.LSTM",
     )
     parser.add_argument("--seed", type=int, default=123)
@@ -139,6 +142,27 @@ def _raise_keyboard_interrupt(_signal_number: int, _frame: object) -> None:
 
 def main() -> None:
     args = parse_args()
+    saved = (
+        torch.load(args.resume, map_location="cpu", weights_only=True)["config"]
+        if args.resume
+        else None
+    )
+    algorithm = args.algorithm or (
+        saved.get("algorithm", "recurrent_ppo") if saved else "recurrent_ppo"
+    )
+    recurrent_type = args.recurrent_type or (
+        saved["network"]["recurrent_type"] if saved else "sru-lstm"
+    )
+    if algorithm == "ppo":
+        if args.recurrent_type is not None:
+            raise ValueError("普通 PPO 不接受 --recurrent-type")
+        recurrent_type = "none"
+    if saved and (
+        algorithm != saved.get("algorithm", "recurrent_ppo")
+        or recurrent_type != saved["network"]["recurrent_type"]
+    ):
+        raise ValueError("恢复训练时不能更换算法或循环单元")
+    args.recurrent_type = recurrent_type
     repository_root = Path(__file__).resolve().parents[1]
     commit_id, diff_content = _capture_source_state(
         repository_root, args.commit_id, args.diff_file
@@ -153,7 +177,7 @@ def main() -> None:
     env = None
     try:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        run_name = f"{args.recurrent_type}_{args.run_name or timestamp}"
+        run_name = f"{'ppo' if algorithm == 'ppo' else args.recurrent_type}_{args.run_name or timestamp}"
         log_dir = Path(args.log_dir) / run_name
         task_config = EnvConfig(
             num_envs=args.num_envs,
@@ -170,7 +194,10 @@ def main() -> None:
         )
         config = TrainConfig(
             env=task_config,
-            network=NetworkConfig(recurrent_type=args.recurrent_type),
+            network=NetworkConfig(**saved["network"])
+            if saved
+            else NetworkConfig(recurrent_type=args.recurrent_type),
+            algorithm=algorithm,
             ppo=PPOConfig(
                 rollout_steps=args.rollout_steps,
                 batch_size=args.batch_size,

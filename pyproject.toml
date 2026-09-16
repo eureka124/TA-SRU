@@ -9,6 +9,7 @@ description = "基于 Isaac Sim/Isaac Lab、无需 SB3 的非对称循环 PPO �
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "imageio-ffmpeg>=0.4.9",
     "numpy>=1.21",
     "Pillow>=8",
     "scikit-fmm>=2025.1",
@@ -19,3 +20,6 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"ta_sru.debug" = ["*.html"]

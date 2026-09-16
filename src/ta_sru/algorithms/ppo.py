@@ -15,7 +15,7 @@ from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
-from ta_sru.algorithms.buffer import CpuRolloutBuffer
+from ta_sru.algorithms.buffer import CpuRolloutBuffer, CpuFeedForwardBuffer
 from ta_sru.config import TrainConfig
 from ta_sru.models.actor_critic import AsymmetricRecurrentActorCritic, RecurrentState
 
@@ -57,7 +57,10 @@ class RecurrentPPO:
         self.observation, _ = env.reset()
         self.episode_starts = np.ones(env.num_envs, dtype=bool)
         self.recurrent_state = self.policy.initial_state(env.num_envs)
-        self.buffer = CpuRolloutBuffer(
+        buffer_class = (
+            CpuFeedForwardBuffer if config.algorithm == "ppo" else CpuRolloutBuffer
+        )
+        self.buffer = buffer_class(
             config.ppo.rollout_steps,
             env.num_envs,
             self.observation,
@@ -500,7 +503,14 @@ class RecurrentPPO:
         )
 
     def load(self, path: str | Path, *, load_optimizer: bool = True) -> None:
-        checkpoint: dict[str, Any] = torch.load(path, map_location=self.device)
+        checkpoint: dict[str, Any] = torch.load(
+            path, map_location=self.device, weights_only=True
+        )
+        saved_algorithm = checkpoint["config"].get("algorithm", "recurrent_ppo")
+        if saved_algorithm != self.config.algorithm:
+            raise ValueError(
+                f"checkpoint 算法 {saved_algorithm} 与当前 {self.config.algorithm} 不一致"
+            )
         self.policy.load_state_dict(checkpoint["policy"])
         if load_optimizer and "optimizer" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer"])

@@ -114,6 +114,17 @@ python scripts/play.py runs/sru-gru_时间戳/checkpoints/model_final.pt --devic
 同时会在运行目录的 `debug/` 下保存六种迷宫各自的 4×1 全局 TOA 汇总 PNG 和原始 NPZ。
 未传入 `--debug` 时不会创建这些标记或文件。
 
+评估 `scripts/play.py --debug` 还会在 `debug/play_时间戳/index.html` 生成回放索引。
+每个并行环境按回合单独保存，回合结束后即可打开；正常退出或 Ctrl+C 会保存未结束回合。
+HTML 可直接用浏览器打开，包含第一视角深度 MP4、同步的动作/实际状态曲线，以及本回合
+边界墙、迷宫墙、随机圆柱和无人机 x/y 轨迹的俯视图。支持播放、调速、逐帧和拖动定位。
+视频保持相机原始分辨率（默认 64×48），按策略频率采样，不经过网络输入的降采样；
+灰度使用固定的 0～`depth_max_distance` 米量程，另存 `depth_raw.npz` 保留原始浮点深度
+（含 NaN/Inf）、时间戳、策略动作、限幅后动作、实际状态及位置。`telemetry.json` 保存
+相同的状态数据和障碍物布局。实际 `vx、vy` 为机体系速度（m/s），`w` 为机体系 Z 轴
+角速度（rad/s）；每帧对应当前动作执行一个策略步后的状态，终止帧在自动重置之前采集。
+请保留 HTML 与视频的相对目录结构。视频编码使用 `imageio-ffmpeg` 自带的 FFmpeg。
+
 `--device` 是 Isaac 仿真设备，`--network-device` 可单独指定网络设备。显存紧张时优先
 减小 `--num-envs`、`--batch-size` 和 `--sequence-length`；rollout buffer 始终留在 CPU。
 
@@ -148,12 +159,12 @@ python scripts/train.py \
 
 训练前可通过 `--recurrent-type` 选择：
 
-| 参数 | 循环单元 |
-|---|---|
-| `sru-lstm` | SRU-LSTM（默认） |
-| `sru-gru` | SRU-GRU |
+| 参数            | 循环单元                   |
+| --------------- | -------------------------- |
+| `sru-lstm`      | SRU-LSTM（默认）           |
+| `sru-gru`       | SRU-GRU                    |
 | `sru-lstm-gate` | 带 refine gate 的 SRU-LSTM |
-| `lstm` | 原生 `torch.nn.LSTM` |
+| `lstm`          | 原生 `torch.nn.LSTM`       |
 
 每次运行会创建 `runs/<循环单元>_<时间戳>/`，其中包含 `config.json`、`command.txt`、
 `commit_id.txt`、`diff.patch`、`progress.csv` 和 `checkpoints/`。`commit_id.txt` 记录

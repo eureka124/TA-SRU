@@ -66,9 +66,9 @@ class SruGruCell(nn.Module):
         self, input_: torch.Tensor, hidden: torch.Tensor, memory: torch.Tensor
     ) -> RecurrentStateTuple:
         del memory  # GRU 没有独立记忆状态；保留参数只是为了统一接口。
-        update_gate, reset_gate = self.gates(
-            torch.cat((input_, hidden), dim=-1)
-        ).chunk(2, dim=-1)
+        update_gate, reset_gate = self.gates(torch.cat((input_, hidden), dim=-1)).chunk(
+            2, dim=-1
+        )
         update_gate = torch.sigmoid(update_gate)
         reset_gate = torch.sigmoid(reset_gate)
         candidate_input = torch.cat((input_, reset_gate * hidden), dim=-1)
@@ -153,7 +153,9 @@ class _StackedSru(nn.Module):
         episode_starts: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, RecurrentStateTuple]:
         if sequence.ndim != 3:
-            raise ValueError(f"sequence 应为三维张量，实际形状为 {tuple(sequence.shape)}")
+            raise ValueError(
+                f"sequence 应为三维张量，实际形状为 {tuple(sequence.shape)}"
+            )
         time_steps, batch_size, _ = sequence.shape
         hidden, memory = state or self.initial_state(
             batch_size, device=sequence.device, dtype=sequence.dtype
@@ -178,7 +180,10 @@ class _StackedSru(nn.Module):
             memory = torch.stack(next_memory)
             outputs.append(layer_input)
         if not outputs:
-            return sequence.new_empty((0, batch_size, self.hidden_size)), (hidden, memory)
+            return sequence.new_empty((0, batch_size, self.hidden_size)), (
+                hidden,
+                memory,
+            )
         return torch.stack(outputs), (hidden, memory)
 
 
@@ -227,13 +232,18 @@ class TorchLstm(nn.Module):
         episode_starts: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, RecurrentStateTuple]:
         if sequence.ndim != 3:
-            raise ValueError(f"sequence 应为三维张量，实际形状为 {tuple(sequence.shape)}")
+            raise ValueError(
+                f"sequence 应为三维张量，实际形状为 {tuple(sequence.shape)}"
+            )
         time_steps, batch_size, _ = sequence.shape
         hidden, memory = state or self.initial_state(
             batch_size, device=sequence.device, dtype=sequence.dtype
         )
         if time_steps == 0:
-            return sequence.new_empty((0, batch_size, self.hidden_size)), (hidden, memory)
+            return sequence.new_empty((0, batch_size, self.hidden_size)), (
+                hidden,
+                memory,
+            )
 
         outputs: list[torch.Tensor] = []
         for time_index in range(time_steps):
@@ -248,11 +258,26 @@ class TorchLstm(nn.Module):
         return torch.stack(outputs), (hidden, memory)
 
 
+class FeedForward(nn.Module):
+    """无参数直通层；空张量只适配共享训练接口，不承载记忆。"""
+
+    def initial_state(self, batch_size: int, *, device, dtype=torch.float32):
+        empty = torch.empty((0, batch_size, 0), device=device, dtype=dtype)
+        return empty, empty.clone()
+
+    def forward(self, sequence, state=None, episode_starts=None):
+        return sequence, self.initial_state(
+            sequence.shape[1], device=sequence.device, dtype=sequence.dtype
+        )
+
+
 def build_recurrent(
     recurrent_type: str, input_size: int, hidden_size: int, num_layers: int
 ) -> nn.Module:
     """根据配置创建循环单元；名称同时用于命令行和日志目录。"""
 
+    if recurrent_type == "none":
+        return FeedForward()
     implementations: dict[str, type[nn.Module]] = {
         "sru-lstm": SruLstm,
         "sru-gru": SruGru,
@@ -263,7 +288,9 @@ def build_recurrent(
         implementation = implementations[recurrent_type]
     except KeyError as error:
         choices = ", ".join(implementations)
-        raise ValueError(f"未知循环单元 {recurrent_type!r}，可选值：{choices}") from error
+        raise ValueError(
+            f"未知循环单元 {recurrent_type!r}，可选值：{choices}"
+        ) from error
     return implementation(input_size, hidden_size, num_layers)
 
 

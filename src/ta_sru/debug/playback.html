@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>无人机导航回放</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; background: #101827; color: #e2e8f0; font: 15px/1.6 system-ui, sans-serif; }
+    h1 { font-size: 24px; margin: 12px 0; } h2 { font-size: 18px; margin: 0 0 10px; }
+    a { color: #7dd3fc; } .muted { color: #a7b7cc; } .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    section { padding: 18px; border: 1px solid #334155; border-radius: 12px; background: #182235; min-width: 0; }
+    video { width: 100%; max-height: 400px; background: black; image-rendering: pixelated; }
+    canvas { width: 100%; display: block; } #map { aspect-ratio: 1; } .chart { height: 155px; }
+    .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 16px 0; }
+    button, select { padding: 6px 10px; background: #283952; color: white; border: 1px solid #64748b; border-radius: 5px; }
+    input[type=range] { flex: 1; min-width: 160px; } table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+    th, td { padding: 6px; text-align: right; border-bottom: 1px solid #334155; } th:first-child { text-align: left; }
+    .action { color: #fbbf24; } .applied { color: #c4b5fd; } .actual { color: #38bdf8; }
+    @media (max-width: 850px) { body { padding: 12px; } .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <a href="../index.html">← 全部回放</a>
+  <h1 id="title"></h1>
+  <p id="summary" class="muted"></p>
+  <div class="grid">
+    <section>
+      <h2>第一视角 · 原始分辨率深度视频</h2>
+      <video id="video" src="depth.mp4" controls preload="auto" playsinline></video>
+      <p id="depthLegend" class="muted"></p>
+      <div class="controls">
+        <button id="previous" aria-label="上一帧">上一帧</button>
+        <button id="next" aria-label="下一帧">下一帧</button>
+        <label>速度 <select id="speed"><option>0.25</option><option>0.5</option><option selected>1</option><option>2</option></select> ×</label>
+        <input id="scrubber" type="range" min="0" value="0" step="1" aria-label="回放帧">
+      </div>
+      <p id="time"></p>
+      <table>
+        <thead><tr><th>分量</th><th class="action">策略输出</th><th class="applied">执行动作</th><th class="actual">实际状态</th></tr></thead>
+        <tbody id="values"></tbody>
+      </table>
+      <p class="muted">vx、vy 为机体系速度（m/s）；w 为机体系 Z 轴角速度（rad/s）。执行动作是环境限幅后的速度指令。
+        每帧显示该动作执行一个策略步后的相机与状态，首帧对应 t = Δt。</p>
+      <a href="depth.mp4" download>下载视频</a> · <a href="depth_raw.npz" download>原始米制深度 / 状态 NPZ</a> · <a href="telemetry.json" download>回放数据 JSON</a>
+    </section>
+    <section>
+      <h2>俯视图 · x / y 轨迹</h2>
+      <canvas id="map" width="640" height="640"></canvas>
+      <p class="muted">灰色：边界与迷宫墙；棕色：本回合圆柱；绿色：起点；红色：目标；蓝线：已飞轨迹；箭头：当前朝向。坐标已扣除并行环境偏移。</p>
+    </section>
+  </div>
+  <section style="margin-top:20px">
+    <h2>动作与实际状态随时间变化</h2>
+    <p><span class="action">━ 策略输出</span>　<span class="applied">┄ 执行动作</span>　<span class="actual">━ 实际状态</span>　<span class="muted">白线：当前视频帧；点击曲线定位。</span></p>
+    <canvas id="chart0" class="chart" width="1000" height="155"></canvas>
+    <canvas id="chart1" class="chart" width="1000" height="155"></canvas>
+    <canvas id="chart2" class="chart" width="1000" height="155"></canvas>
+  </section>
+  <script id="playback-data" type="application/json">__PLAYBACK_DATA__</script>
+  <script>
+    'use strict';
+    const data = JSON.parse(document.getElementById('playback-data').textContent);
+    const samples = data.samples;
+    const video = document.getElementById('video');
+    const scrubber = document.getElementById('scrubber');
+    const labels = ['vx (m/s)', 'vy (m/s)', 'w (rad/s)'];
+    const reasons = {success: '到达目标', collided: '碰撞', outside: '越界', time_out: '超时', interrupted: '运行结束 / 中断'};
+    let current = 0;
+    document.getElementById('title').textContent = `环境 ${data.env_id} / 回合 ${data.episode_id} · ${data.maze}`;
+    document.getElementById('summary').textContent = `${reasons[data.outcome] || data.outcome} · ${samples.length} 帧 · 策略采样 ${(1 / data.dt).toFixed(2)} Hz`;
+    document.getElementById('depthLegend').textContent = `${data.depth_shape[1]} × ${data.depth_shape[0]} 原始像素，无降采样、无叠加。黑色 = 0 m，白色 = ${data.depth_max} m 或更远 / 无回波。NPZ 保留原始浮点深度。`;
+    scrubber.max = samples.length - 1;
+
+    function context(canvas) {
+      const c = canvas.getContext('2d');
+      c.clearRect(0, 0, canvas.width, canvas.height);
+      c.font = '13px system-ui'; c.lineWidth = 1; c.setLineDash([]);
+      return c;
+    }
+
+    function drawMap(sample) {
+      const canvas = document.getElementById('map'), c = context(canvas);
+      const margin = 46, extent = data.extent + 1;
+      const scale = (canvas.width - margin * 2) / (extent * 2);
+      const x = v => canvas.width / 2 + v * scale;
+      const y = v => canvas.height / 2 - v * scale;
+      c.strokeStyle = '#334155'; c.fillStyle = '#94a3b8';
+      for (let v = -data.extent; v <= data.extent; v += 5) {
+        c.beginPath(); c.moveTo(x(v), y(-data.extent)); c.lineTo(x(v), y(data.extent));
+        c.moveTo(x(-data.extent), y(v)); c.lineTo(x(data.extent), y(v)); c.stroke();
+        c.fillText(v, x(v) - 5, y(-data.extent) + 20);
+        c.fillText(v, x(-data.extent) - 30, y(v) + 4);
+      }
+      c.fillText('x (m)', canvas.width - 45, canvas.height - 12); c.fillText('y (m)', 10, 18);
+      c.fillStyle = '#94a3b8';
+      for (const wall of data.rectangles) {
+        c.save(); c.translate(x(wall.xy[0]), y(wall.xy[1])); c.rotate(-wall.yaw);
+        c.fillRect(-wall.size[0] * scale / 2, -wall.size[1] * scale / 2, wall.size[0] * scale, wall.size[1] * scale); c.restore();
+      }
+      function circle(xy, radius, color) {
+        c.fillStyle = color; c.beginPath(); c.arc(x(xy[0]), y(xy[1]), radius, 0, Math.PI * 2); c.fill();
+      }
+      for (const cylinder of data.cylinders) circle(cylinder.xy, cylinder.radius * scale, '#b78254');
+      c.strokeStyle = '#38bdf8'; c.lineWidth = 2;
+      c.beginPath(); c.moveTo(x(data.start[0]), y(data.start[1]));
+      for (let i = 0; i <= current; i++) c.lineTo(x(samples[i].xy[0]), y(samples[i].xy[1]));
+      c.stroke(); circle(data.start, 5, '#4ade80'); circle(data.goal, 6, '#fb7185');
+      c.save(); c.translate(x(sample.xy[0]), y(sample.xy[1])); c.rotate(-sample.yaw);
+      c.fillStyle = '#38bdf8'; c.beginPath(); c.moveTo(11, 0); c.lineTo(-7, -6); c.lineTo(-4, 0); c.lineTo(-7, 6); c.closePath(); c.fill(); c.restore();
+      c.fillStyle = '#e2e8f0'; c.fillText(`x = ${sample.xy[0].toFixed(2)} m, y = ${sample.xy[1].toFixed(2)} m`, 65, 22);
+    }
+
+    // 曲线背景只绘制一次，播放时仅叠加当前帧指示线。
+    const chartLayers = labels.map((label, axis) => {
+      const layer = document.createElement('canvas'); layer.width = 1000; layer.height = 155;
+      const c = context(layer), left = 78, right = 975, top = 28, bottom = 126;
+      let low = 0, high = 0;
+      for (const sample of samples) for (const key of ['action', 'applied', 'actual']) {
+        low = Math.min(low, sample[key][axis]); high = Math.max(high, sample[key][axis]);
+      }
+      const padding = Math.max((high - low) * 0.12, 0.1); low -= padding; high += padding;
+      const x = index => left + index / Math.max(samples.length - 1, 1) * (right - left);
+      const y = value => bottom - (value - low) / (high - low) * (bottom - top);
+      c.fillStyle = '#e2e8f0'; c.fillText(label, left, 16);
+      for (let i = 0; i <= 2; i++) {
+        const value = low + (high - low) * i / 2;
+        c.fillStyle = '#94a3b8'; c.fillText(value.toFixed(2), 12, y(value) + 4);
+        c.strokeStyle = '#334155'; c.beginPath(); c.moveTo(left, y(value)); c.lineTo(right, y(value)); c.stroke();
+      }
+      for (let i = 0; i <= 4; i++) {
+        const index = Math.round((samples.length - 1) * i / 4);
+        c.fillStyle = '#94a3b8'; c.fillText(`${samples[index].t.toFixed(1)} s`, x(index) - 14, 148);
+      }
+      for (const [key, color] of [['action', '#fbbf24'], ['actual', '#38bdf8'], ['applied', '#c4b5fd']]) {
+        c.strokeStyle = color; c.lineWidth = 1.5; c.setLineDash(key === 'applied' ? [5, 4] : []);
+        c.beginPath();
+        samples.forEach((sample, index) => {
+          if (index === 0) c.moveTo(x(index), y(sample[key][axis]));
+          else c.lineTo(x(index), y(sample[key][axis]));
+        }); c.stroke();
+      }
+      return layer;
+    });
+
+    function render(index) {
+      current = Math.max(0, Math.min(samples.length - 1, index));
+      const sample = samples[current]; scrubber.value = current;
+      document.getElementById('time').textContent = `仿真时间 ${sample.t.toFixed(3)} s · 帧 ${current + 1} / ${samples.length}`;
+      document.getElementById('values').innerHTML = labels.map((label, axis) => `<tr><th>${label}</th><td class="action">${sample.action[axis].toFixed(3)}</td><td class="applied">${sample.applied[axis].toFixed(3)}</td><td class="actual">${sample.actual[axis].toFixed(3)}</td></tr>`).join('');
+      drawMap(sample);
+      chartLayers.forEach((layer, axis) => {
+        const c = context(document.getElementById(`chart${axis}`)); c.drawImage(layer, 0, 0);
+        const x = 78 + current / Math.max(samples.length - 1, 1) * (975 - 78);
+        c.strokeStyle = '#f8fafc'; c.beginPath(); c.moveTo(x, 24); c.lineTo(x, 130); c.stroke();
+      });
+    }
+
+    function seek(index) {
+      video.pause(); render(index);
+      // 定位到帧内，避免编码时间戳的舍入使逐帧跳转落在上一帧。
+      video.currentTime = (current + 0.1) * data.dt;
+    }
+    function sync(time) {
+      const index = Math.max(0, Math.min(samples.length - 1, Math.floor(time / data.dt + 1e-5)));
+      if (index !== current) render(index);
+    }
+    if ('requestVideoFrameCallback' in video) {
+      const onFrame = (_, metadata) => { sync(metadata.mediaTime); video.requestVideoFrameCallback(onFrame); };
+      video.requestVideoFrameCallback(onFrame);
+    } else {
+      const tick = () => { if (!video.paused) sync(video.currentTime); requestAnimationFrame(tick); }; tick();
+    }
+    video.addEventListener('seeked', () => sync(video.currentTime));
+    video.addEventListener('ended', () => render(samples.length - 1));
+    video.addEventListener('error', () => {
+      document.getElementById('time').textContent = '无法加载 depth.mp4，请保留回放目录结构并使用支持 H.264 的浏览器。';
+    });
+    scrubber.addEventListener('input', () => seek(Number(scrubber.value)));
+    document.getElementById('previous').onclick = () => seek(current - 1);
+    document.getElementById('next').onclick = () => seek(current + 1);
+    document.getElementById('speed').onchange = event => { video.playbackRate = Number(event.target.value); };
+    labels.forEach((_, axis) => {
+      const canvas = document.getElementById(`chart${axis}`);
+      canvas.onclick = event => {
+        const bounds = canvas.getBoundingClientRect();
+        const x = (event.clientX - bounds.left) / bounds.width * canvas.width;
+        seek(Math.round((x - 78) / (975 - 78) * (samples.length - 1)));
+      };
+    });
+    render(0);
+  </script>
+</body>
+</html>

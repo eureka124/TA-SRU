@@ -41,9 +41,19 @@ class _Episode:
 
 
 class PlayDebugRecorder:
-    def __init__(self, output_dir: str | Path, dt: float) -> None:
+    def __init__(
+        self,
+        output_dir: str | Path,
+        dt: float,
+        *,
+        max_episodes_per_layout: int | None = None,
+    ) -> None:
         if dt <= 0:
             raise ValueError("回放时间步长必须为正数")
+        if max_episodes_per_layout is not None and max_episodes_per_layout <= 0:
+            raise ValueError("每种布局的保存上限必须为正数")
+        self.max_episodes_per_layout = max_episodes_per_layout
+        self.layout_counts: dict[str, int] = {}
         self.dt = dt
         self.output_dir = Path(output_dir) / datetime.now(
             timezone.utc
@@ -102,6 +112,10 @@ class PlayDebugRecorder:
     def begin_step(self, env: NavigationEnv, actions: torch.Tensor) -> None:
         self.requested_actions = _numpy(actions)
         for env_id in range(env.num_envs):
+            maze = MAZE_LAYOUTS[int(env.maze_ids[env_id].item())].name
+            if self._layout_full(maze):
+                self.episodes.pop(env_id, None)
+                continue
             if env_id not in self.episodes:
                 episode_id = self.episode_counts.get(env_id, 0)
                 metadata = self._scene(env, env_id)
@@ -111,6 +125,8 @@ class PlayDebugRecorder:
     def capture(self, env: NavigationEnv, done: torch.Tensor) -> None:
         """每个策略步结束、自动重置之前，统一采样相机和机体状态。"""
 
+        if not self.episodes:
+            return
         depth = _numpy(env.camera.data.output["distance_to_image_plane"])
         if depth.ndim == 4:
             depth = depth[..., 0]
@@ -129,6 +145,9 @@ class PlayDebugRecorder:
             for key in ("success", "collided", "outside", "time_out")
         }
         for env_id, episode in list(self.episodes.items()):
+            if self._layout_full(episode.metadata["maze"]):
+                del self.episodes[env_id]
+                continue
             episode.depth.append(depth[env_id].copy())
             episode.samples.append(
                 {
@@ -141,8 +160,27 @@ class PlayDebugRecorder:
                 }
             )
             if done_host[env_id]:
-                reason = next(key for key, values in outcomes.items() if values[env_id])
+                if self.max_episodes_per_layout is not None:
+                    # 回放独立于评估脚本，使用相同的碰撞优先顺序。
+                    if outcomes["collided"][env_id] or outcomes["outside"][env_id]:
+                        reason = "collision"
+                    elif outcomes["success"][env_id]:
+                        reason = "success"
+                    elif outcomes["time_out"][env_id]:
+                        reason = "timeout"
+                    else:
+                        raise ValueError("已结束的回放回合缺少终止原因")
+                else:
+                    reason = next(
+                        key for key, values in outcomes.items() if values[env_id]
+                    )
                 self._finish(env_id, reason)
+
+    def _layout_full(self, maze: str) -> bool:
+        return (
+            self.max_episodes_per_layout is not None
+            and self.layout_counts.get(maze, 0) >= self.max_episodes_per_layout
+        )
 
     def _finish(self, env_id: int, reason: str) -> None:
         episode = self.episodes[env_id]
@@ -226,6 +264,8 @@ class PlayDebugRecorder:
             }
         )
         self.episode_counts[env_id] = metadata["episode_id"] + 1
+        maze = metadata["maze"]
+        self.layout_counts[maze] = self.layout_counts.get(maze, 0) + 1
         del self.episodes[env_id]
         self._write_index()
         print(f"[DEBUG] 已保存 {name}（{reason}，{len(depth)} 帧）", flush=True)
@@ -239,7 +279,7 @@ class PlayDebugRecorder:
         content = (
             '<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
             "<title>导航调试回放</title><h1>导航调试回放</h1>"
-            "<p>每个回合结束后更新此列表；刷新页面查看新回放。关闭评估时也会保存未结束回合。</p>"
+            "<p>每个回合结束后更新此列表；刷新页面查看新回放。</p>"
             f"<ul>{rows}</ul></html>"
         )
         temporary = self.output_dir / "index.html.tmp"
@@ -247,8 +287,11 @@ class PlayDebugRecorder:
         temporary.replace(self.output_dir / "index.html")
 
     def close(self) -> None:
-        """正常退出和 Ctrl+C 均保存已采集的未结束回合。"""
+        """限额评估只保存完整回合；原有无限额回放仍保存中断回合。"""
 
+        if self.max_episodes_per_layout is not None:
+            self.episodes.clear()
+            return
         errors = []
         for env_id in list(self.episodes):
             try:

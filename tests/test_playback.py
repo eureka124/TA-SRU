@@ -160,6 +160,34 @@ class PlaybackTests(unittest.TestCase):
                 [p.name for p in Path(recorder.output_dir).iterdir()], ["index.html"]
             )
 
+    def test_shared_layout_quota_and_collision_precedence(self):
+        env = _env()
+        env.maze_ids[:] = 0
+        env.extras["collided"][:] = True
+        env.extras["success"][:] = True
+        with TemporaryDirectory() as temporary:
+            recorder = PlayDebugRecorder(temporary, 0.1, max_episodes_per_layout=3)
+            for _ in range(4):
+                recorder.begin_step(env, env.actions)
+                recorder.capture(env, torch.tensor([True, True]))
+            recorder.close()
+            self.assertEqual(len(recorder.entries), 3)
+            self.assertEqual(recorder.layout_counts, {"maze_01": 3})
+            self.assertEqual(recorder.episodes, {})
+            self.assertTrue(
+                all(entry["outcome"] == "collision" for entry in recorder.entries)
+            )
+
+    def test_limited_recorder_does_not_save_partial_episode(self):
+        env = _env()
+        with TemporaryDirectory() as temporary:
+            recorder = PlayDebugRecorder(temporary, 0.1, max_episodes_per_layout=4)
+            recorder.begin_step(env, env.actions)
+            recorder.capture(env, torch.tensor([False, False]))
+            recorder.close()
+            self.assertEqual(recorder.entries, [])
+            self.assertEqual(recorder.episodes, {})
+
 
 if __name__ == "__main__":
     unittest.main()

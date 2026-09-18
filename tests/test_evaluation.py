@@ -2,10 +2,10 @@
 
 import unittest
 
-from scripts.evaluation import EvaluationStats, configure_evaluation, evaluation_outcome
 from ta_sru.config import EnvConfig
 from ta_sru.envs.curriculum import select_training_maze_curriculum_stage
 from ta_sru.envs.layouts import MAZE_LAYOUTS
+from ta_sru.evaluation import EvaluationStats, configure_evaluation, evaluation_outcome
 
 
 class EvaluationTests(unittest.TestCase):

@@ -72,11 +72,7 @@ def main() -> int:
         from ta_sru.config import EnvConfig, NetworkConfig, PPOConfig, TrainConfig
         from ta_sru.envs import IsaacLabWrapper, NavigationEnv, make_isaac_env_cfg
         from ta_sru.envs.layouts import MAZE_LAYOUTS
-
-        if __package__:
-            from .evaluation import EvaluationStats, configure_evaluation
-        else:
-            from evaluation import EvaluationStats, configure_evaluation
+        from ta_sru.evaluation import EvaluationStats, configure_evaluation
 
         stage = "读取 checkpoint"
         checkpoint_path = Path(args.checkpoint).resolve()

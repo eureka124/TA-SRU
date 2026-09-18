@@ -29,7 +29,6 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 | --- | --- |
 | `scripts/train.py` | 新建或恢复训练，启动仿真，创建运行目录，保存配置、日志和 checkpoint。 |
 | `scripts/play.py` | 加载命令行指定的 checkpoint，运行六种布局的评估，保存统计及可选回放。 |
-| `scripts/evaluation.py` | 评估配置覆盖、终局分类、每种布局的样本配额及汇总计算；由 `play.py` 导入，无需单独运行。 |
 | `scripts/progress_to_tensorboard.py` | 将已有训练 `progress.csv` 回填为 TensorBoard 事件。 |
 | `scripts/export_actor.py` | 从训练 checkpoint 导出只包含 Actor 权重及相关配置的 PyTorch 文件，无需启动仿真。 |
 
@@ -38,6 +37,7 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 | 文件 | 用途 |
 | --- | --- |
 | `src/ta_sru/config.py` | `EnvConfig`、`NetworkConfig`、`PPOConfig`、`TrainConfig` 默认值和合法性检查。命令行未开放的设置在这里调整。 |
+| `src/ta_sru/evaluation.py` | 独立于仿真的评估配置、终局分类、每种布局的样本配额及汇总计算；作为包内模块供 `scripts/play.py` 和测试导入，无需单独运行。 |
 | `src/ta_sru/envs/layouts.py` | `maze_01` 至 `maze_06` 的墙体位置、方向和两组起终点路线。 |
 | `src/ta_sru/envs/curriculum.py` | 根据累计训练 transition 数选择布局范围和活动圆柱数量。 |
 | `src/ta_sru/envs/navigation.py` | Isaac Lab 场景、传感器、动作执行、观测、奖励、终止和重置逻辑。 |

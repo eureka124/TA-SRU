@@ -72,7 +72,11 @@ def main() -> int:
         from ta_sru.config import EnvConfig, NetworkConfig, PPOConfig, TrainConfig
         from ta_sru.envs import IsaacLabWrapper, NavigationEnv, make_isaac_env_cfg
         from ta_sru.envs.layouts import MAZE_LAYOUTS
-        from ta_sru.evaluation import EvaluationStats, configure_evaluation
+        from ta_sru.evaluation import (
+            EvaluationStats,
+            configure_evaluation,
+            format_evaluation_table,
+        )
 
         stage = "读取 checkpoint"
         checkpoint_path = Path(args.checkpoint).resolve()
@@ -150,10 +154,15 @@ def main() -> int:
                 config.env.debug_output_dir,
                 config.env.policy_dt,
                 max_episodes_per_layout=min(4, args.episodes_per_layout),
+                episodes_per_layout=args.episodes_per_layout,
             )
             env.env.play_debug_recorder = debug_recorder
             print(
                 f"[DEBUG] 回放索引：{debug_recorder.output_dir / 'index.html'}",
+                flush=True,
+            )
+            print(
+                f"[DEBUG] 每种布局按开始顺序录制第 {debug_recorder.selection_range[0]}–{debug_recorder.selection_range[1]} 个回合",
                 flush=True,
             )
         state = agent.policy.initial_state(env.num_envs)
@@ -164,7 +173,11 @@ def main() -> int:
 
         stage = "执行策略推理"
         agent.policy.eval()
-        while not stats.complete and (args.steps is None or step < args.steps):
+        # 统计满额后，允许已选中的回放完成；额外回合不再计入统计。
+        while (
+            not stats.complete
+            or (debug_recorder is not None and debug_recorder.episodes)
+        ) and (args.steps is None or step < args.steps):
             if not simulation_app.is_running():
                 break
             tensor_observation = {
@@ -241,7 +254,10 @@ def main() -> int:
                     json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
                 print(
-                    f"评估{'完成' if stats.complete else '提前结束'}：{json.dumps(stats.summary(), ensure_ascii=False)}",
+                    f"\n评估{'完成' if stats.complete else '提前结束'}"
+                    f"（每种布局目标：{stats.target} 回合）\n"
+                    f"{format_evaluation_table(report)}\n"
+                    f"评估结果：{results_dir}",
                     flush=True,
                 )
             except Exception as error:  # noqa: BLE001

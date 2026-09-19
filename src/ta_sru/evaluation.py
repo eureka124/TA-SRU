@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unicodedata import east_asian_width
+
 from ta_sru.envs.layouts import MAZE_LAYOUTS
 
 
@@ -29,6 +31,45 @@ def evaluation_outcome(info: dict) -> str:
     if info.get("time_out", False):
         return "timeout"
     raise ValueError("已结束的评估回合缺少终止原因")
+
+
+def format_evaluation_table(summary: dict) -> str:
+    """将评估汇总排成终端表格，兼顾中文列宽及未完成评估。"""
+    rows = [
+        [
+            "布局",
+            "回合数",
+            "成功（数量/比例）",
+            "碰撞（数量/比例）",
+            "超时（数量/比例）",
+        ]
+    ]
+    for name, counts in [*summary["layouts"].items(), ("整体", summary["overall"])]:
+        row = [name, str(counts["episodes"])]
+        for outcome in ("success", "collision", "timeout"):
+            rate = counts[f"{outcome}_rate"]
+            percentage = "—" if rate is None else f"{rate:.2%}"
+            row.append(f"{counts[outcome]} / {percentage}")
+        rows.append(row)
+
+    def display_width(value: str) -> int:
+        return sum(2 if east_asian_width(char) in ("W", "F") else 1 for char in value)
+
+    widths = [
+        max(display_width(row[index]) for row in rows) for index in range(len(rows[0]))
+    ]
+    separator = "+-" + "-+-".join("-" * width for width in widths) + "-+"
+    lines = [separator]
+    for index, row in enumerate(rows):
+        cells = []
+        for column, (value, width) in enumerate(zip(row, widths)):
+            padding = " " * (width - display_width(value))
+            cells.append(value + padding if column == 0 else padding + value)
+        lines.append("| " + " | ".join(cells) + " |")
+        if index == 0 or index == len(rows) - 2:
+            lines.append(separator)
+    lines.append(separator)
+    return "\n".join(lines)
 
 
 class EvaluationStats:

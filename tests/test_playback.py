@@ -188,6 +188,61 @@ class PlaybackTests(unittest.TestCase):
             self.assertEqual(recorder.entries, [])
             self.assertEqual(recorder.episodes, {})
 
+    def test_middle_selection_follows_starts_not_completions(self):
+        env = _env()
+        env.maze_ids[:] = 0
+        env.extras["success"][:] = True
+        with TemporaryDirectory() as temporary:
+            recorder = PlayDebugRecorder(
+                temporary, 0.1, max_episodes_per_layout=4, episodes_per_layout=6
+            )
+            self.assertEqual(recorder.selection_range, (2, 5))
+            # 第 2 个回合持续三步，第 3 个先结束，第 4 个与它同时结束。
+            for done in ([True, False], [True, False], [True, True], [True, True]):
+                recorder.begin_step(env, env.actions)
+                recorder.capture(env, torch.tensor(done))
+            recorder.begin_step(env, env.actions)
+            recorder.capture(env, torch.tensor([True, True]))
+            recorder.close()
+            self.assertEqual(len(recorder.entries), 4)
+            self.assertEqual(
+                [entry["layout_start_episode"] for entry in recorder.entries],
+                [3, 2, 4, 5],
+            )
+            selected = next(
+                entry
+                for entry in recorder.entries
+                if entry["layout_start_episode"] == 2
+            )
+            self.assertEqual(selected["frames"], 3)
+            data = json.loads(
+                (recorder.output_dir / selected["path"] / "telemetry.json").read_text()
+            )
+            self.assertEqual(data["layout_start_episode"], 2)
+            self.assertEqual(recorder.episodes, {})
+
+    def test_middle_selection_skips_early_episodes_without_recording(self):
+        env = _env()
+        env.maze_ids[:] = 0
+        env.extras["success"][:] = True
+        with TemporaryDirectory() as temporary:
+            recorder = PlayDebugRecorder(
+                temporary, 0.1, max_episodes_per_layout=4, episodes_per_layout=1000
+            )
+            self.assertEqual(recorder.selection_range, (499, 502))
+            for _ in range(249):
+                recorder.begin_step(env, env.actions)
+                self.assertEqual(recorder.episodes, {})
+                recorder.capture(env, torch.tensor([True, True]))
+            for _ in range(2):
+                recorder.begin_step(env, env.actions)
+                recorder.capture(env, torch.tensor([True, True]))
+            recorder.close()
+            self.assertEqual(
+                [entry["layout_start_episode"] for entry in recorder.entries],
+                [499, 500, 501, 502],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

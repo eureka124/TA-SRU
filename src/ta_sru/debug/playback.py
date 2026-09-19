@@ -47,12 +47,24 @@ class PlayDebugRecorder:
         dt: float,
         *,
         max_episodes_per_layout: int | None = None,
+        episodes_per_layout: int | None = None,
     ) -> None:
         if dt <= 0:
             raise ValueError("回放时间步长必须为正数")
         if max_episodes_per_layout is not None and max_episodes_per_layout <= 0:
             raise ValueError("每种布局的保存上限必须为正数")
         self.max_episodes_per_layout = max_episodes_per_layout
+        if episodes_per_layout is not None and (
+            episodes_per_layout <= 0 or max_episodes_per_layout is None
+        ):
+            raise ValueError("中间回合录制需要正数评估目标及保存上限")
+        self.selection_range: tuple[int, int] | None = None
+        if episodes_per_layout is not None:
+            count = min(max_episodes_per_layout, episodes_per_layout)
+            first = (episodes_per_layout - count) // 2 + 1
+            self.selection_range = (first, first + count - 1)
+        self.layout_starts: dict[str, int] = {}
+        self.running_envs: set[int] = set()
         self.layout_counts: dict[str, int] = {}
         self.dt = dt
         self.output_dir = Path(output_dir) / datetime.now(
@@ -113,18 +125,36 @@ class PlayDebugRecorder:
         self.requested_actions = _numpy(actions)
         for env_id in range(env.num_envs):
             maze = MAZE_LAYOUTS[int(env.maze_ids[env_id].item())].name
+            layout_episode = None
+            if self.selection_range is not None:
+                # 在回合开始时决定是否录制，避免完成快慢影响入选概率。
+                if env_id in self.running_envs:
+                    continue
+                self.running_envs.add(env_id)
+                layout_episode = self.layout_starts.get(maze, 0) + 1
+                self.layout_starts[maze] = layout_episode
+                episode_id = self.episode_counts.get(env_id, 0)
+                self.episode_counts[env_id] = episode_id + 1
+                first, last = self.selection_range
+                if not first <= layout_episode <= last:
+                    continue
             if self._layout_full(maze):
                 self.episodes.pop(env_id, None)
                 continue
             if env_id not in self.episodes:
-                episode_id = self.episode_counts.get(env_id, 0)
+                if self.selection_range is None:
+                    episode_id = self.episode_counts.get(env_id, 0)
                 metadata = self._scene(env, env_id)
                 metadata.update(episode_id=episode_id, dt=self.dt)
+                if layout_episode is not None:
+                    metadata["layout_start_episode"] = layout_episode
                 self.episodes[env_id] = _Episode(metadata)
 
     def capture(self, env: NavigationEnv, done: torch.Tensor) -> None:
         """每个策略步结束、自动重置之前，统一采样相机和机体状态。"""
 
+        done_host = _numpy(done)
+        self.running_envs.difference_update(np.flatnonzero(done_host).tolist())
         if not self.episodes:
             return
         depth = _numpy(env.camera.data.output["distance_to_image_plane"])
@@ -139,7 +169,6 @@ class PlayDebugRecorder:
         )
         yaw = _numpy(yaw_from_quaternion(quaternion))
         applied = _numpy(env.actions)
-        done_host = _numpy(done)
         outcomes = {
             key: _numpy(env.extras[key])
             for key in ("success", "collided", "outside", "time_out")
@@ -261,9 +290,12 @@ class PlayDebugRecorder:
                 "episode_id": metadata["episode_id"],
                 "outcome": reason,
                 "frames": len(depth),
+                "maze": metadata["maze"],
+                "layout_start_episode": metadata.get("layout_start_episode"),
             }
         )
-        self.episode_counts[env_id] = metadata["episode_id"] + 1
+        if self.selection_range is None:
+            self.episode_counts[env_id] = metadata["episode_id"] + 1
         maze = metadata["maze"]
         self.layout_counts[maze] = self.layout_counts.get(maze, 0) + 1
         del self.episodes[env_id]
@@ -273,7 +305,12 @@ class PlayDebugRecorder:
     def _write_index(self) -> None:
         rows = "\n".join(
             f'<li><a href="{entry["path"]}/index.html">环境 {entry["env_id"]} / 回合 {entry["episode_id"]}</a>'
-            f" — {html.escape(entry['outcome'])}，{entry['frames']} 帧</li>"
+            + (
+                f" — {entry['maze']} / 开始序号 {entry['layout_start_episode']}"
+                if entry["layout_start_episode"] is not None
+                else ""
+            )
+            + f" — {html.escape(entry['outcome'])}，{entry['frames']} 帧</li>"
             for entry in self.entries
         )
         content = (

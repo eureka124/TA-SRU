@@ -95,9 +95,9 @@ class EnvConfig:
     # 与 manager_based/training_mazes 的逐策略步奖励系数保持一致。
     # DirectRLEnv 不会像 RewardManager 一样再乘 policy_dt，因此这里直接保存最终系数。
     # 朝目标方向速度奖励的权重。
-    goal_velocity_weight: float = 0.1
+    goal_velocity_weight: float = 0.0
     # 相邻策略步 TOA 减少量奖励的权重。
-    toa_progress_weight: float = 5.0
+    toa_progress_weight: float = 50.0
     # 相邻策略步动作变化量惩罚的权重。
     action_smoothness_weight: float = -0.1
     # 接触力归一化惩罚的权重。
@@ -162,14 +162,8 @@ class EnvConfig:
             raise ValueError("每个动作下界都必须小于上界")
         if not 0.0 < self.contact_penalty_ramp_fraction <= 1.0:
             raise ValueError("contact_penalty_ramp_fraction 必须位于 (0, 1]")
-        if (
-            not 0.0
-            < self.minimum_contact_force_threshold
-            <= self.collision_force_threshold
-        ):
-            raise ValueError(
-                "minimum_contact_force_threshold 必须为正数且不能大于 collision_force_threshold"
-            )
+        if not 0.0 < self.minimum_contact_force_threshold <= self.collision_force_threshold:
+            raise ValueError("minimum_contact_force_threshold 必须为正数且不能大于 collision_force_threshold")
 
 
 @dataclass
@@ -283,7 +277,5 @@ class TrainConfig:
         if self.algorithm not in ("ppo", "recurrent_ppo"):
             raise ValueError("algorithm 必须是 ppo 或 recurrent_ppo")
         if (self.algorithm == "ppo") != (self.network.recurrent_type == "none"):
-            raise ValueError(
-                "普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元"
-            )
+            raise ValueError("普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元")
         self.ppo.validate(self.env.num_envs)

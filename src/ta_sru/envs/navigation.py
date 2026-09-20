@@ -8,35 +8,47 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import gymnasium as gym
+import isaaclab.sim as sim_utils
 import numpy as np
 import torch
 import torch.nn.functional as F
-
-import isaaclab.sim as sim_utils
 from isaaclab.assets import (
     Articulation,
     AssetBaseCfg,
     RigidObject,
-    RigidObjectCollection,
     RigidObjectCfg,
+    RigidObjectCollection,
     RigidObjectCollectionCfg,
 )
 from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensor, ContactSensorCfg, MultiMeshRayCasterCamera, MultiMeshRayCasterCameraCfg
+from isaaclab.sensors import (
+    ContactSensor,
+    ContactSensorCfg,
+    MultiMeshRayCasterCamera,
+    MultiMeshRayCasterCameraCfg,
+)
 from isaaclab.sensors.ray_caster import patterns
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
 from ta_sru.config import EnvConfig
+from ta_sru.envs.contact import peak_contact_force
 from ta_sru.envs.curriculum import select_training_maze_curriculum_stage
 from ta_sru.envs.layouts import MAZE_LAYOUTS
-from ta_sru.envs.toa import build_toa_bank, save_toa_global_maps
-from ta_sru.models.hummingbird import HummingbirdParameters, rotate_inverse, yaw_from_quaternion
+from ta_sru.envs.toa import (
+    build_toa_bank,
+    resolve_toa_normalization_max,
+    save_toa_global_maps,
+)
+from ta_sru.models.hummingbird import (
+    HummingbirdParameters,
+    rotate_inverse,
+    yaw_from_quaternion,
+)
 from ta_sru.models.hummingbird_asset import HUMMINGBIRD_CFG
 from ta_sru.models.lee_controller import LeePositionController
-
 
 INNER_WALL_LENGTH_SCALES = (1.0, 1.0, 1.0, 0.5, 0.5)
 MAX_INNER_WALLS = len(INNER_WALL_LENGTH_SCALES)
@@ -75,7 +87,9 @@ def _camera_mesh_targets(
 def _fixed_cuboid(size: tuple[float, float, float]) -> sim_utils.CuboidCfg:
     return sim_utils.CuboidCfg(
         size=size,
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            kinematic_enabled=True, disable_gravity=True
+        ),
         collision_props=sim_utils.CollisionPropertiesCfg(),
     )
 
@@ -85,7 +99,9 @@ def _fixed_cylinder(radius: float, height: float) -> sim_utils.CylinderCfg:
         radius=radius,
         height=height,
         axis="Z",
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True),
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            kinematic_enabled=True, disable_gravity=True
+        ),
         collision_props=sim_utils.CollisionPropertiesCfg(),
         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.32, 0.43, 0.55)),
     )
@@ -150,7 +166,9 @@ class NavigationSceneCfg(InteractiveSceneCfg):
         rigid_objects={
             f"cylinder_{index:02d}": RigidObjectCfg(
                 prim_path=f"{{ENV_REGEX_NS}}/RandomCylinder_{index:02d}",
-                spawn=_fixed_cylinder(*CYLINDER_VARIANTS[index % len(CYLINDER_VARIANTS)]),
+                spawn=_fixed_cylinder(
+                    *CYLINDER_VARIANTS[index % len(CYLINDER_VARIANTS)]
+                ),
                 init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -10.0)),
             )
             for index in range(MAX_RANDOM_CYLINDERS)
@@ -178,7 +196,7 @@ class NavigationSceneCfg(InteractiveSceneCfg):
     contact_forces = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/(base_link|rotor_0|rotor_1|rotor_2|rotor_3)",
         update_period=1.0 / 120.0,
-        history_length=6,
+        history_length=5,
         debug_vis=False,
     )
     light = AssetBaseCfg(
@@ -197,7 +215,8 @@ class IsaacNavigationEnvCfg(DirectRLEnvCfg):
         high=np.asarray((2.0, 0.5, np.pi / 3), dtype=np.float32),
         dtype=np.float32,
     )
-    observation_space = {
+    # Isaac Lab 的 configclass 会复制实例配置，此字典不是共享运行状态。
+    observation_space = {  # noqa: RUF012
         "camera": gym.spaces.Box(-1.0, 1.0, (1, 12, 16), dtype=np.float32),
         "robot_state": gym.spaces.Box(-np.inf, np.inf, (8,), dtype=np.float32),
         "critic_toa": gym.spaces.Box(-1.0, 1.0, (1, 16, 16), dtype=np.float32),
@@ -230,6 +249,9 @@ def make_isaac_env_cfg(task: EnvConfig, sim_device: str) -> IsaacNavigationEnvCf
     cfg.sim.device = sim_device
     cfg.scene.num_envs = task.num_envs
     cfg.debug_vis = task.debug
+    # 历史窗口恰好覆盖一个策略步，并随物理步长和抽取倍数同步调整。
+    cfg.scene.contact_forces.update_period = task.physics_dt
+    cfg.scene.contact_forces.history_length = task.control_decimation
     cfg.action_space = gym.spaces.Box(
         np.asarray(task.action_low, dtype=np.float32),
         np.asarray(task.action_high, dtype=np.float32),
@@ -254,7 +276,9 @@ def make_isaac_env_cfg(task: EnvConfig, sim_device: str) -> IsaacNavigationEnvCf
             task.arena_height,
         )
     cfg.scene.random_cylinders.rigid_objects = dict(
-        list(cfg.scene.random_cylinders.rigid_objects.items())[: task.random_cylinder_count]
+        list(cfg.scene.random_cylinders.rigid_objects.items())[
+            : task.random_cylinder_count
+        ]
     )
     # 相机目标与实际生成的圆柱保持一致，避免减少数量后匹配到不存在的路径。
     cfg.scene.camera.mesh_prim_paths = _camera_mesh_targets(task.random_cylinder_count)
@@ -288,10 +312,18 @@ class NavigationEnv(DirectRLEnv):
         self.goal_positions = torch.zeros((self.num_envs, 3), device=self.device)
         self.position_setpoints = torch.zeros_like(self.goal_positions)
         self.yaw_setpoints = torch.zeros((self.num_envs, 1), device=self.device)
-        self.maze_ids = torch.arange(self.num_envs, device=self.device) % len(MAZE_LAYOUTS)
-        self.route_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.direction_reversed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.toa_map_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.maze_ids = torch.arange(self.num_envs, device=self.device) % len(
+            MAZE_LAYOUTS
+        )
+        self.route_ids = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.direction_reversed = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self.toa_map_ids = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
         self.previous_toa = torch.full((self.num_envs,), torch.nan, device=self.device)
         self.training_step_offset = 0
         self.training_curriculum_stage = 0
@@ -323,7 +355,9 @@ class NavigationEnv(DirectRLEnv):
 
     def _create_layout_tensors(self) -> None:
         layout_count = len(MAZE_LAYOUTS)
-        self.wall_xy = torch.zeros((layout_count, MAX_INNER_WALLS, 2), device=self.device)
+        self.wall_xy = torch.zeros(
+            (layout_count, MAX_INNER_WALLS, 2), device=self.device
+        )
         self.wall_yaw = torch.zeros((layout_count, MAX_INNER_WALLS), device=self.device)
         self.wall_length = torch.tensor(
             INNER_WALL_LENGTH_SCALES, device=self.device
@@ -347,8 +381,12 @@ class NavigationEnv(DirectRLEnv):
                 self.wall_yaw[layout_id, wall_id] = np.pi / 2 if wall.vertical else 0.0
                 self.wall_active[layout_id, wall_id] = True
             for route_id, (start, goal) in enumerate(layout.routes):
-                self.route_starts[layout_id, route_id] = torch.tensor(start, device=self.device)
-                self.route_goals[layout_id, route_id] = torch.tensor(goal, device=self.device)
+                self.route_starts[layout_id, route_id] = torch.tensor(
+                    start, device=self.device
+                )
+                self.route_goals[layout_id, route_id] = torch.tensor(
+                    goal, device=self.device
+                )
 
         specs = [
             CYLINDER_VARIANTS[index % len(CYLINDER_VARIANTS)]
@@ -363,6 +401,9 @@ class NavigationEnv(DirectRLEnv):
 
     def _create_toa_tensors(self) -> None:
         toa_bank = build_toa_bank(self.task)
+        self.toa_normalization_max = resolve_toa_normalization_max(
+            toa_bank, self.task.toa_normalization_max
+        )
         self.toa_maps = torch.from_numpy(toa_bank).to(self.device)
         if self.task.debug:
             output_dir = self.task.debug_output_dir or "debug"
@@ -446,7 +487,9 @@ class NavigationEnv(DirectRLEnv):
         cone_positions = self.robot.data.root_pos_w.clone()
         cone_positions[:, 2] += 0.75
         cone_positions[:, :2] += direction * (0.5 * cone_length)[:, None]
-        cone_orientations = self._yaw_quaternion(torch.atan2(velocity_xy[:, 1], velocity_xy[:, 0]))
+        cone_orientations = self._yaw_quaternion(
+            torch.atan2(velocity_xy[:, 1], velocity_xy[:, 0])
+        )
         cone_scales = torch.ones((self.num_envs, 3), device=self.device)
         cone_scales[:, 0] = cone_length
         self.velocity_visualizer.visualize(
@@ -461,7 +504,10 @@ class NavigationEnv(DirectRLEnv):
         last_positions = self._trajectory_history[
             torch.arange(self.num_envs, device=self.device), last_indices
         ]
-        moved = torch.linalg.vector_norm(positions - last_positions, dim=-1) >= TRAJECTORY_POINT_SPACING
+        moved = (
+            torch.linalg.vector_norm(positions - last_positions, dim=-1)
+            >= TRAJECTORY_POINT_SPACING
+        )
         append = (empty | moved) & (self._trajectory_counts < TRAJECTORY_MAX_POINTS)
         env_ids = torch.nonzero(append, as_tuple=False).squeeze(-1)
         if len(env_ids):
@@ -469,8 +515,9 @@ class NavigationEnv(DirectRLEnv):
             self._trajectory_history[env_ids, slots] = positions[env_ids]
             self._trajectory_counts[env_ids] += 1
 
-        valid = torch.arange(TRAJECTORY_MAX_POINTS, device=self.device)[None, :] < (
-            self._trajectory_counts[:, None]
+        valid = (
+            torch.arange(TRAJECTORY_MAX_POINTS, device=self.device)[None, :]
+            < (self._trajectory_counts[:, None])
         )
         self.trajectory_visualizer.visualize(self._trajectory_history[valid])
 
@@ -483,17 +530,26 @@ class NavigationEnv(DirectRLEnv):
     def _apply_action(self) -> None:
         quaternion = self.robot.data.root_quat_w
         w, x, y, z = quaternion.unbind(dim=-1)
-        forward = torch.stack((w * w + x * x - y * y - z * z, 2 * (x * y + w * z)), dim=-1)
-        forward = forward / torch.linalg.vector_norm(forward, dim=-1, keepdim=True).clamp_min(1.0e-6)
+        forward = torch.stack(
+            (w * w + x * x - y * y - z * z, 2 * (x * y + w * z)), dim=-1
+        )
+        forward = forward / torch.linalg.vector_norm(
+            forward, dim=-1, keepdim=True
+        ).clamp_min(1.0e-6)
         side = torch.stack((-forward[:, 1], forward[:, 0]), dim=-1)
-        target_velocity_xy = forward * self.actions[:, 0:1] + side * self.actions[:, 1:2]
+        target_velocity_xy = (
+            forward * self.actions[:, 0:1] + side * self.actions[:, 1:2]
+        )
         target_velocity = torch.cat(
-            (target_velocity_xy, torch.zeros((self.num_envs, 1), device=self.device)), dim=-1
+            (target_velocity_xy, torch.zeros((self.num_envs, 1), device=self.device)),
+            dim=-1,
         )
         self.position_setpoints[:, :2] += target_velocity_xy * self.physics_dt
         self.position_setpoints[:, 2] = 2.0
         self.yaw_setpoints += self.actions[:, 2:3] * self.physics_dt
-        self.yaw_setpoints[:] = (self.yaw_setpoints + torch.pi) % (2 * torch.pi) - torch.pi
+        self.yaw_setpoints[:] = (self.yaw_setpoints + torch.pi) % (
+            2 * torch.pi
+        ) - torch.pi
 
         root_state = torch.cat(
             (
@@ -538,8 +594,12 @@ class NavigationEnv(DirectRLEnv):
     def _sample_toa(self, points_xy: torch.Tensor) -> torch.Tensor:
         grid_size = self.toa_maps.shape[-1]
         spacing = 2.0 * self.task.arena_half_extent / (grid_size - 1)
-        x = ((points_xy[..., 0] + self.task.arena_half_extent) / spacing).clamp(0, grid_size - 1)
-        y = ((points_xy[..., 1] + self.task.arena_half_extent) / spacing).clamp(0, grid_size - 1)
+        x = ((points_xy[..., 0] + self.task.arena_half_extent) / spacing).clamp(
+            0, grid_size - 1
+        )
+        y = ((points_xy[..., 1] + self.task.arena_half_extent) / spacing).clamp(
+            0, grid_size - 1
+        )
         x0, y0 = torch.floor(x).long(), torch.floor(y).long()
         x1, y1 = (x0 + 1).clamp(max=grid_size - 1), (y0 + 1).clamp(max=grid_size - 1)
         wx, wy = x - x0, y - y0
@@ -554,7 +614,9 @@ class NavigationEnv(DirectRLEnv):
         return value_0 * (1 - wy) + value_1 * wy
 
     def _critic_toa_observation(self) -> torch.Tensor:
-        local_position = self.robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
+        local_position = (
+            self.robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
+        )
         yaw = yaw_from_quaternion(self.robot.data.root_quat_w)
         body_x = self.toa_crop_body[:, 0].unsqueeze(0)
         body_y = self.toa_crop_body[:, 1].unsqueeze(0)
@@ -569,13 +631,15 @@ class NavigationEnv(DirectRLEnv):
         values = self._sample_toa(points)
         values = torch.nan_to_num(
             values,
-            nan=self.task.toa_normalization_max,
-            posinf=self.task.toa_normalization_max,
+            nan=self.toa_normalization_max,
+            posinf=self.toa_normalization_max,
             neginf=0.0,
         )
-        values = values.clamp(0.0, self.task.toa_normalization_max)
-        values = values / self.task.toa_normalization_max * 2.0 - 1.0
-        return values.reshape(self.num_envs, 1, self.task.toa_crop_size, self.task.toa_crop_size)
+        values = values.clamp(0.0, self.toa_normalization_max)
+        values = values / self.toa_normalization_max * 2.0 - 1.0
+        return values.reshape(
+            self.num_envs, 1, self.task.toa_crop_size, self.task.toa_crop_size
+        )
 
     def _get_observations(self) -> dict[str, dict[str, torch.Tensor]]:
         quaternion = self.robot.data.root_quat_w
@@ -583,7 +647,9 @@ class NavigationEnv(DirectRLEnv):
             quaternion, self.goal_positions - self.robot.data.root_pos_w
         )
         velocity_body = rotate_inverse(quaternion, self.robot.data.root_lin_vel_w)
-        angular_velocity_body = rotate_inverse(quaternion, self.robot.data.root_ang_vel_w)
+        angular_velocity_body = rotate_inverse(
+            quaternion, self.robot.data.root_ang_vel_w
+        )
         robot_state = torch.cat(
             (
                 relative_goal[:, :2].clamp(-5.0, 5.0),
@@ -602,8 +668,10 @@ class NavigationEnv(DirectRLEnv):
         }
 
     def _contact_force(self) -> torch.Tensor:
-        forces = self.contact_sensor.data.net_forces_w
-        return torch.linalg.vector_norm(forces, dim=-1).amax(dim=1)
+        # 历史从新到旧排列；只取本策略步，避免短暂接触漏检或跨步重复惩罚。
+        return peak_contact_force(
+            self.contact_sensor.data.net_forces_w_history, self.cfg.decimation
+        )
 
     @property
     def training_elapsed_steps(self) -> int:
@@ -676,10 +744,16 @@ class NavigationEnv(DirectRLEnv):
         goal_direction = goal_delta / (
             torch.linalg.vector_norm(goal_delta, dim=-1, keepdim=True) + 1.0e-6
         )
-        goal_velocity = torch.sum(self.robot.data.root_lin_vel_w[:, :2] * goal_direction, dim=-1)
-        smoothness = torch.linalg.vector_norm(self.actions - self.previous_actions, dim=-1)
+        goal_velocity = torch.sum(
+            self.robot.data.root_lin_vel_w[:, :2] * goal_direction, dim=-1
+        )
+        smoothness = torch.linalg.vector_norm(
+            self.actions - self.previous_actions, dim=-1
+        )
 
-        local_position = self.robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
+        local_position = (
+            self.robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
+        )
         current_toa = self._sample_toa(local_position.unsqueeze(1)).squeeze(1)
         valid = torch.isfinite(self.previous_toa) & torch.isfinite(current_toa)
         toa_progress = torch.where(
@@ -740,17 +814,25 @@ class NavigationEnv(DirectRLEnv):
         )
         for cylinder_id in range(cylinder_count):
             radius = self.cylinder_radii[cylinder_id]
-            limit = self.task.arena_half_extent - self.task.wall_thickness / 2 - radius - 0.35
+            limit = (
+                self.task.arena_half_extent
+                - self.task.wall_thickness / 2
+                - radius
+                - 0.35
+            )
             unresolved = torch.ones(len(env_ids), dtype=torch.bool, device=self.device)
             for _ in range(128):
                 if not torch.any(unresolved):
                     break
-                candidate = (torch.rand((len(env_ids), 2), device=self.device) * 2 - 1) * limit
+                candidate = (
+                    torch.rand((len(env_ids), 2), device=self.device) * 2 - 1
+                ) * limit
                 delta = (candidate[:, None] - selected_wall_xy).abs()
                 dx = torch.clamp(delta[..., 0] - half_x, min=0.0)
                 dy = torch.clamp(delta[..., 1] - half_y, min=0.0)
                 valid = torch.all(
-                    (~selected_wall_active) | (dx.square() + dy.square() >= (radius + 0.35).square()),
+                    (~selected_wall_active)
+                    | (dx.square() + dy.square() >= (radius + 0.35).square()),
                     dim=1,
                 )
                 clearance = (radius + 1.0).square()
@@ -758,7 +840,8 @@ class NavigationEnv(DirectRLEnv):
                 valid &= torch.sum((candidate - goal_xy).square(), dim=-1) >= clearance
                 if cylinder_id:
                     distance = torch.sum(
-                        (candidate[:, None] - positions[:, :cylinder_id]).square(), dim=-1
+                        (candidate[:, None] - positions[:, :cylinder_id]).square(),
+                        dim=-1,
                     )
                     minimum = radius + self.cylinder_radii[:cylinder_id] + 0.35
                     valid &= torch.all(distance >= minimum.square(), dim=1)
@@ -772,6 +855,9 @@ class NavigationEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: Sequence[int]) -> None:
         env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
         super()._reset_idx(env_ids)
+        # 动作观测和平滑惩罚的缓存只属于当前回合。
+        self.actions[env_ids] = 0.0
+        self.previous_actions[env_ids] = 0.0
         if self.task.debug:
             self._trajectory_counts[env_ids] = 0
         count = len(env_ids)
@@ -805,7 +891,9 @@ class NavigationEnv(DirectRLEnv):
         self.maze_ids[env_ids] = maze_ids
         self.route_ids[env_ids] = route_ids
         self.direction_reversed[env_ids] = reversed_direction
-        self.toa_map_ids[env_ids] = maze_ids * 4 + route_ids * 2 + reversed_direction.long()
+        self.toa_map_ids[env_ids] = (
+            maze_ids * 4 + route_ids * 2 + reversed_direction.long()
+        )
         self.goal_positions[env_ids, :2] = origins[:, :2] + goal_xy
         self.goal_positions[env_ids, 2] = 2.0
         self.previous_toa[env_ids] = torch.nan
@@ -838,7 +926,9 @@ class NavigationEnv(DirectRLEnv):
             pose[:, 2] = torch.where(selected_active[:, wall_id], 2.0, -10.0)
             pose[:, 3:7] = self._yaw_quaternion(selected_yaw[:, wall_id])
             wall.write_root_pose_to_sim(pose, env_ids)
-            wall.write_root_velocity_to_sim(torch.zeros((count, 6), device=self.device), env_ids)
+            wall.write_root_velocity_to_sim(
+                torch.zeros((count, 6), device=self.device), env_ids
+            )
 
         cylinder_xy = self._sample_cylinder_positions(
             env_ids,
@@ -850,7 +940,9 @@ class NavigationEnv(DirectRLEnv):
             selected_active,
             active_cylinder_count,
         )
-        cylinder_pose = self.random_cylinders.data.default_object_state[env_ids, :, :7].clone()
+        cylinder_pose = self.random_cylinders.data.default_object_state[
+            env_ids, :, :7
+        ].clone()
         # 未启用的固定槽位停放到地面以下，避免动态改变场景拓扑。
         cylinder_pose[:, :, :2] = origins[:, None, :2]
         cylinder_pose[:, :, 2] = -10.0
@@ -863,7 +955,9 @@ class NavigationEnv(DirectRLEnv):
             )
         self.random_cylinders.write_object_pose_to_sim(cylinder_pose, env_ids=env_ids)
         self.random_cylinders.write_object_velocity_to_sim(
-            torch.zeros((count, self.task.random_cylinder_count, 6), device=self.device),
+            torch.zeros(
+                (count, self.task.random_cylinder_count, 6), device=self.device
+            ),
             env_ids=env_ids,
         )
 

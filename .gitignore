@@ -57,8 +57,6 @@ _build
 
 # Tests
 tests/*
-!tests/test_playback.py
-!tests/test_evaluation.py
 
 # Docker history
 .isaac-lab-docker-history

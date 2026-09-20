@@ -36,7 +36,9 @@ class LeePositionController(nn.Module):
         self.register_buffer("position_gain", torch.tensor(position_gain))
         self.register_buffer("velocity_gain", torch.tensor(velocity_gain))
         self.register_buffer("attitude_gain", torch.tensor(attitude_gain) / inertia)
-        self.register_buffer("angular_rate_gain", torch.tensor(angular_rate_gain) / inertia)
+        self.register_buffer(
+            "angular_rate_gain", torch.tensor(angular_rate_gain) / inertia
+        )
         self.register_buffer("inertia", inertia)
 
     def forward(
@@ -53,9 +55,13 @@ class LeePositionController(nn.Module):
             root_state, (3, 4, 3, 3), dim=-1
         )
         target_position = position if target_position is None else target_position
-        target_velocity = torch.zeros_like(velocity) if target_velocity is None else target_velocity
+        target_velocity = (
+            torch.zeros_like(velocity) if target_velocity is None else target_velocity
+        )
         target_acceleration = (
-            torch.zeros_like(velocity) if target_acceleration is None else target_acceleration
+            torch.zeros_like(velocity)
+            if target_acceleration is None
+            else target_acceleration
         )
         if target_yaw is None:
             target_yaw = yaw_from_quaternion(quaternion).unsqueeze(-1)
@@ -72,11 +78,17 @@ class LeePositionController(nn.Module):
 
         rotation = quaternion_to_matrix(quaternion)
         desired_body_x = torch.cat(
-            (torch.cos(target_yaw), torch.sin(target_yaw), torch.zeros_like(target_yaw)),
+            (
+                torch.cos(target_yaw),
+                torch.sin(target_yaw),
+                torch.zeros_like(target_yaw),
+            ),
             dim=-1,
         )
         desired_body_z = -normalize(acceleration_command)
-        desired_body_y = normalize(torch.linalg.cross(desired_body_z, desired_body_x, dim=-1))
+        desired_body_y = normalize(
+            torch.linalg.cross(desired_body_z, desired_body_x, dim=-1)
+        )
         desired_rotation = torch.stack(
             (
                 torch.linalg.cross(desired_body_y, desired_body_z, dim=-1),
@@ -97,9 +109,13 @@ class LeePositionController(nn.Module):
         angular_acceleration = (
             -attitude_error * self.attitude_gain
             - angular_velocity_body * self.angular_rate_gain
-            + torch.linalg.cross(angular_velocity_body, angular_velocity_body, dim=-1)
         )
-        thrust = -self.mass * torch.sum(acceleration_command * rotation[..., :, 2], dim=-1)
-        torque = angular_acceleration * self.inertia
+        thrust = -self.mass * torch.sum(
+            acceleration_command * rotation[..., :, 2], dim=-1
+        )
+        # 刚体方程为 JΩ_dot + Ω×(JΩ) = τ；补偿项在力矩域相加。
+        gyroscopic_torque = torch.linalg.cross(
+            angular_velocity_body, angular_velocity_body * self.inertia, dim=-1
+        )
+        torque = angular_acceleration * self.inertia + gyroscopic_torque
         return torch.cat((thrust.unsqueeze(-1), torque), dim=-1)
-

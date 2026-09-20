@@ -40,6 +40,7 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 | `src/ta_sru/evaluation.py` | 独立于仿真的评估配置、终局分类、每种布局的样本配额及汇总计算；作为包内模块供 `scripts/play.py` 和测试导入，无需单独运行。 |
 | `src/ta_sru/envs/layouts.py` | `maze_01` 至 `maze_06` 的墙体位置、方向和两组起终点路线。 |
 | `src/ta_sru/envs/curriculum.py` | 根据累计训练 transition 数选择布局范围和活动圆柱数量。 |
+| `src/ta_sru/envs/contact.py` | 计算当前策略步所有物理子步、所有机体部件的接触力峰值。 |
 | `src/ta_sru/envs/navigation.py` | Isaac Lab 场景、传感器、动作执行、观测、奖励、终止和重置逻辑。 |
 | `src/ta_sru/envs/wrappers.py` | 将仿真接口转换为 PPO 使用的 NumPy 观测、奖励、终止标记和 episode 信息。 |
 | `src/ta_sru/envs/toa.py` | 用 FMM 构建 Time of Arrival（TOA）地图，进行采样、局部裁剪和调试图输出。 |
@@ -63,22 +64,23 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 | `assets/hummingbird/hummingbird.yaml` | 无人机物理及控制参数。 |
 | `tests/test_evaluation.py` | 检查固定评估课程、结局优先级和每种布局配额。 |
 | `tests/test_playback.py` | 检查原始深度、视频编码、并行回合隔离及回放保存上限。 |
-| `tests/test_core.py`（本地存在时） | 网络、控制器、TOA、buffer、PPO 更新和日志测试；当前忽略规则未将该文件纳入版本管理。 |
+| `tests/test_core.py` | 网络、控制器惯性补偿、接触历史、TOA 归一化、buffer、PPO 更新和日志测试。 |
 | `pyproject.toml` | Python 包信息、依赖及打包配置。 |
 | `.gitignore` | 排除运行产物、缓存等；部分本地 shell 脚本也被忽略。 |
 | `.gitattributes` | Git 文件属性配置。 |
 | `THIRD_PARTY_NOTICES.md` | 控制器及 SRU 实现的第三方来源和许可证。 |
 | `runs/` | 训练日志、checkpoint、评估统计和 debug 回放，通常不纳入 Git。 |
 
-工作区还可能包含以下本地便捷脚本。它们含固定环境名、参数或机器路径，使用前应检查内容；本文以 `scripts/*.py` 的命令为准。
+以下四个启动脚本纳入版本管理，使用当前已激活的 Python 环境，自动切换到项目根目录并转发追加参数。它们以前台进程运行，可自行放入 tmux/screen；追加的同名参数覆盖预设值。
 
 | 本地脚本 | 用途及当前注意事项 |
 | --- | --- |
-| `train.sh` | 在 tmux 中启动循环 PPO。当前预设 `batch-size=10240`，大于 `512 × 6 = 3072` 个 rollout 样本，需先修正才能通过配置检查。 |
-| `ppo_train.sh` | 在 tmux 中启动普通 PPO。 |
-| `play.sh` | 启动评估；当前本地版本写死 checkpoint 路径，需修改路径后使用。 |
-| `tensorboard.sh` | 在 screen 会话中启动 TensorBoard。 |
-| `rsync.sh` | 从预设远端同步部分模型和 TensorBoard 文件；地址和筛选规则需要按使用场景调整。 |
+| `train.sh` | 循环 PPO 默认 6 个环境、512 步 rollout、1024 batch size；如 `./train.sh --headless --recurrent-type lstm`。 |
+| `ppo_train.sh` | 普通 PPO 默认 6 个环境、512 batch size；如 `./ppo_train.sh --headless`。 |
+| `play.sh` | checkpoint 由参数指定；如 `./play.sh runs/<运行名>/checkpoints/model_best.pt --headless --debug`。 |
+| `tensorboard.sh` | 前台启动 TensorBoard，默认日志目录 `runs/`、端口 6006。 |
+
+本地 `rsync.sh` 可能包含机器专用地址，仍被忽略；如需使用，请自行检查远端和文件筛选规则。
 
 ## 3. 如何训练
 
@@ -130,6 +132,7 @@ python scripts/train.py \
 | `--seed` | `123` | 随机种子。 |
 | `--cylinders` | `60` | 随机圆柱槽位上限，实际活动数量还受课程控制。 |
 | `--toa-grid-size` | `401` | 全局 TOA 网格边长。 |
+| `--toa-normalization-max` | 新训练自动计算 | Critic 的固定 TOA 量程；省略时新训练使用静态地图的可通行最大值，恢复训练沿用 checkpoint。 |
 | `--network-device` | 跟随 `--device` | 网络设备；`--device` 指定仿真设备。 |
 | `--log-dir` | `runs` | 日志根目录。 |
 | `--run-name` | 时间戳 | 自定义运行名后缀；最终目录带算法或循环单元前缀，同名目录已存在会报错。 |
@@ -156,6 +159,8 @@ python scripts/train.py \
 
 **环境和 PPO 配置仍由本次命令及默认值构建**，不会全部沿用 checkpoint。请参照原运行的 `config.json` 和 `command.txt` 传入原参数。`--total-timesteps` 是包含已训练步数的总目标；恢复会创建新的运行目录，不会继续向旧目录追加日志。
 
+TOA 归一化量程作为输入编码的一部分，恢复时默认保留 checkpoint 的值；旧 checkpoint 缺少该字段时按 255 处理。显式传入 `--toa-normalization-max` 才覆盖它。
+
 ### 训练课程与指标
 
 默认课程按总训练进度启用不同布局和圆柱数量：
@@ -171,6 +176,10 @@ python scripts/train.py \
 | 95% 以后 | 全部六种 | 60 |
 
 布局在 episode 重置时切换；圆柱数量不超过 `--cylinders`。碰撞接触力阈值在前 40% 训练进度从 50 N 线性减至 0.1 N，随后保持不变。
+
+接触检测和接触惩罚都取当前策略步全部物理子步、全部机体部件的最大接触力，不再只看最后一个子步。历史窗口随 `control_decimation` 调整，避免漏掉碰撞后弹开的短暂接触，也避免重复计入上一策略步。回合重置会清零当前及历史动作缓存。
+
+新训练的 Critic TOA 输入使用全部 24 张静态地图的统一可通行最大值归一化，排除墙体/不可达哨兵值，输出截断到 [-1,1]；墙体保持 +1。此缩放不改变 TOA 进度奖励的原始量纲。静态地图只建模墙体，不包含每回合随机圆柱，因此它提供全局路径引导，不是真实场景的完整最短路代价；圆柱仍由深度观测和物理碰撞反映。
 
 当前训练达到碰撞阈值即终止。训练日志按“成功优先、其次碰撞、其余超时”分类，越界也可能被归为超时。TensorBoard 的 `Metrics/*` 使用最近 100 个已完成 episodes；这些训练指标与后文独立评估的固定场景及分类口径不同。
 
@@ -244,6 +253,8 @@ python scripts/play.py runs/<运行名>/checkpoints/model_best.pt \
 ```
 
 普通 PPO 和各类循环 PPO 使用相同入口，结构从 checkpoint 读取。评估采用确定性动作，不更新网络。
+
+评估直接加载网络，不创建 PPO 训练器、优化器或 rollout buffer；每步仅执行 Actor 前向，不计算 Critic。环境仍生成 TOA 以计算回报。
 
 评估固定使用 `layouts.py` 的全部六种布局，不沿用训练课程阶段。圆柱数量采用 checkpoint 最终课程的数量，并受其圆柱槽位上限约束；碰撞阈值固定为 **0.1 N**。
 
@@ -370,6 +381,8 @@ Isaac Sim / PhysX → NavigationEnv → IsaacLabWrapper → PPO
 ```
 
 默认物理频率为 120 Hz，每 5 个物理步执行一次策略决策，即 24 Hz。Actor 与 Critic 使用独立编码器。修改布局看 `envs/layouts.py`，修改奖励/终止看 `envs/navigation.py`，修改网络看 `models/actor_critic.py`、`models/recurrent.py` 和 `NetworkConfig`；`share_depth_encoder=True` 当前尚未实现。
+
+Lee 控制器在机体系力矩中加入 `Ω × (JΩ)`，补偿刚体方程的陀螺耦合。接触历史检测及控制器修复会改变旧 checkpoint 的仿真轨迹和结局；与修复前的评估结果比较时，请同时记录代码版本。
 
 导出 Actor：
 

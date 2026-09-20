@@ -10,6 +10,8 @@ from ta_sru.envs.layouts import MAZE_LAYOUTS
 def configure_evaluation(values: dict) -> dict:
     """只覆盖本次评估配置，使训练进度不再影响场景或碰撞阈值。"""
     values = dict(values)
+    # 缺少该字段的历史 checkpoint 使用旧版固定归一化量程。
+    values.setdefault("toa_normalization_max", 255.0)
     cylinders = values.get("training_curriculum_cylinder_counts", (60,))[-1]
     values.update(
         training_curriculum_stage_fractions=(0.0,),
@@ -20,6 +22,28 @@ def configure_evaluation(values: dict) -> dict:
         minimum_contact_force_threshold=0.1,
     )
     return values
+
+
+def load_evaluation_policy(checkpoint: dict, device: str):
+    """只加载推理网络，不创建优化器、训练缓冲或训练日志。"""
+    import torch
+
+    from ta_sru.config import NetworkConfig
+    from ta_sru.models.actor_critic import AsymmetricRecurrentActorCritic
+
+    values = checkpoint["config"]
+    network = NetworkConfig(**values["network"])
+    algorithm = values.get("algorithm", "recurrent_ppo")
+    if algorithm not in ("ppo", "recurrent_ppo") or (
+        (algorithm == "ppo") != (network.recurrent_type == "none")
+    ):
+        raise ValueError("checkpoint 算法与网络结构不一致")
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        print("[提示] CUDA 不可用，网络设备回退到 CPU")
+        device = "cpu"
+    policy = AsymmetricRecurrentActorCritic(network)
+    policy.load_state_dict(checkpoint["policy"], strict=True)
+    return policy.to(device).eval()
 
 
 def evaluation_outcome(info: dict) -> str:

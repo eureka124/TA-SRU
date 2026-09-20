@@ -68,14 +68,14 @@ def main() -> int:
         simulation_app = AppLauncher(args).app
 
         stage = "导入项目模块"
-        from ta_sru.algorithms import RecurrentPPO
-        from ta_sru.config import EnvConfig, NetworkConfig, PPOConfig, TrainConfig
+        from ta_sru.config import EnvConfig
         from ta_sru.envs import IsaacLabWrapper, NavigationEnv, make_isaac_env_cfg
         from ta_sru.envs.layouts import MAZE_LAYOUTS
         from ta_sru.evaluation import (
             EvaluationStats,
             configure_evaluation,
             format_evaluation_table,
+            load_evaluation_policy,
         )
 
         stage = "读取 checkpoint"
@@ -84,16 +84,6 @@ def main() -> int:
         values = checkpoint["config"]
         env_values = configure_evaluation(values["env"])
         env_values["num_envs"] = args.num_envs
-        ppo_values = dict(values["ppo"])
-        rollout_sample_count = int(ppo_values["rollout_steps"]) * args.num_envs
-        checkpoint_batch_size = int(ppo_values["batch_size"])
-        if checkpoint_batch_size > rollout_sample_count:
-            # 评估不会更新 PPO，仅缩小训练批次参数以通过配置一致性校验。
-            ppo_values["batch_size"] = rollout_sample_count
-            print(
-                "评估环境数较少："
-                f"batch_size 从 {checkpoint_batch_size} 调整为 {rollout_sample_count}"
-            )
         run_dir = (
             checkpoint_path.parent.parent
             if checkpoint_path.parent.name == "checkpoints"
@@ -102,14 +92,8 @@ def main() -> int:
         # 不继承 checkpoint 中的调试状态；只有本次显式传入 --debug 才启用。
         env_values["debug"] = args.debug
         env_values["debug_output_dir"] = str(run_dir / "debug") if args.debug else None
-        config = TrainConfig(
-            env=EnvConfig(**env_values),
-            network=NetworkConfig(**values["network"]),
-            algorithm=values.get("algorithm", "recurrent_ppo"),
-            ppo=PPOConfig(**ppo_values),
-            total_timesteps=values["total_timesteps"],
-            device=args.network_device or args.device,
-        )
+        task_config = EnvConfig(**env_values)
+        task_config.validate()
         results_dir = args.output_dir or (
             run_dir
             / "evaluation"
@@ -120,10 +104,10 @@ def main() -> int:
         report_metadata = {
             "checkpoint": str(checkpoint_path),
             "num_envs": args.num_envs,
-            "collision_force_threshold": config.env.collision_force_threshold,
+            "collision_force_threshold": task_config.collision_force_threshold,
             "cylinders": min(
-                config.env.training_curriculum_cylinder_counts[0],
-                config.env.random_cylinder_count,
+                task_config.training_curriculum_cylinder_counts[0],
+                task_config.random_cylinder_count,
             ),
         }
         episode_file = (results_dir / "episodes.csv").open(
@@ -135,24 +119,26 @@ def main() -> int:
         )
         episode_writer.writeheader()
         print(f"评估结果：{results_dir}；每种布局 {stats.target} 回合", flush=True)
-        print(f"循环单元：{config.network.recurrent_type}")
+        print(f"循环单元：{values['network']['recurrent_type']}")
         if args.debug:
-            print(f"调试输出：{config.env.debug_output_dir}")
+            print(f"调试输出：{task_config.debug_output_dir}")
 
         stage = "创建仿真环境"
-        isaac_config = make_isaac_env_cfg(config.env, sim_device=args.device)
-        env = IsaacLabWrapper(NavigationEnv(isaac_config, config.env))
+        isaac_config = make_isaac_env_cfg(task_config, sim_device=args.device)
+        env = IsaacLabWrapper(NavigationEnv(isaac_config, task_config))
 
         stage = "创建策略并加载 checkpoint"
-        agent = RecurrentPPO(env, config)
-        agent.load(args.checkpoint, load_optimizer=False)
+        policy = load_evaluation_policy(checkpoint, args.network_device or args.device)
+        # 同步旧流程的课程进度，用于评估回报中的接触惩罚系数。
+        env.set_training_progress(int(checkpoint.get("timesteps", 0)))
+        del checkpoint
         observation, _ = env.reset()
         if args.debug:
             from ta_sru.debug.playback import PlayDebugRecorder
 
             debug_recorder = PlayDebugRecorder(
-                config.env.debug_output_dir,
-                config.env.policy_dt,
+                task_config.debug_output_dir,
+                task_config.policy_dt,
                 max_episodes_per_layout=min(4, args.episodes_per_layout),
                 episodes_per_layout=args.episodes_per_layout,
             )
@@ -165,14 +151,13 @@ def main() -> int:
                 f"[DEBUG] 每种布局按开始顺序录制第 {debug_recorder.selection_range[0]}–{debug_recorder.selection_range[1]} 个回合",
                 flush=True,
             )
-        state = agent.policy.initial_state(env.num_envs)
+        state = policy.initial_state(env.num_envs)
         episode_starts = np.ones(env.num_envs, dtype=bool)
         episode_lengths = np.zeros(env.num_envs, dtype=np.int64)
         episode_returns = np.zeros(env.num_envs, dtype=np.float64)
         step = 0
 
         stage = "执行策略推理"
-        agent.policy.eval()
         # 统计满额后，允许已选中的回放完成；额外回合不再计入统计。
         while (
             not stats.complete
@@ -181,15 +166,15 @@ def main() -> int:
             if not simulation_app.is_running():
                 break
             tensor_observation = {
-                key: torch.as_tensor(value, dtype=torch.float32, device=agent.device)
+                key: torch.as_tensor(value, dtype=torch.float32, device=policy.device)
                 for key, value in observation.items()
+                if key in ("camera", "robot_state")
             }
             with torch.inference_mode():
-                action, _, _, state = agent.policy.act(
+                action, state = policy.act_actor(
                     tensor_observation,
                     state,
-                    torch.as_tensor(episode_starts, device=agent.device),
-                    deterministic=True,
+                    torch.as_tensor(episode_starts, device=policy.device),
                 )
             if debug_recorder is not None:
                 debug_recorder.begin_step(env.env, action)

@@ -11,7 +11,7 @@ import signal
 import subprocess
 import sys
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Isaac Lab 2.3.2 需要先加载 Conda 环境中的新版 Warp。
@@ -72,6 +72,12 @@ def parse_args() -> argparse.Namespace:
         help="每隔多少次 PPO 更新写入 CSV 和 TensorBoard（默认：1）",
     )
     parser.add_argument("--toa-grid-size", type=int, default=401)
+    parser.add_argument(
+        "--toa-normalization-max",
+        type=float,
+        default=None,
+        help="固定 TOA 量程；新训练默认自动计算，恢复时默认沿用 checkpoint",
+    )
     parser.add_argument("--cylinders", type=int, default=60)
     parser.add_argument(
         "--debug",
@@ -176,7 +182,7 @@ def main() -> None:
 
     env = None
     try:
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
         run_name = f"{'ppo' if algorithm == 'ppo' else args.recurrent_type}_{args.run_name or timestamp}"
         log_dir = Path(args.log_dir) / run_name
         task_config = EnvConfig(
@@ -185,6 +191,13 @@ def main() -> None:
             debug=args.debug,
             debug_output_dir=str(log_dir / "debug") if args.debug else None,
             toa_grid_size=args.toa_grid_size,
+            toa_normalization_max=(
+                args.toa_normalization_max
+                if args.toa_normalization_max is not None
+                else saved["env"].get("toa_normalization_max", 255.0)
+                if saved
+                else None
+            ),
             random_cylinder_count=args.cylinders,
         )
         checkpoint_dir = (

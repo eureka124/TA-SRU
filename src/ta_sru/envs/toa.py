@@ -11,7 +11,9 @@ from ta_sru.config import EnvConfig
 from ta_sru.envs.layouts import MAZE_LAYOUTS, wall_rectangle
 
 
-def layout_rectangles(config: EnvConfig, layout_id: int) -> list[tuple[float, float, float, float]]:
+def layout_rectangles(
+    config: EnvConfig, layout_id: int
+) -> list[tuple[float, float, float, float]]:
     """返回边界和内部墙体的 ``center_x, center_y, size_x, size_y``。"""
 
     extent = config.arena_half_extent
@@ -108,6 +110,17 @@ def _traversable_toa_max(values: np.ndarray) -> float:
     return max(float(np.max(values[traversable])), 1.0e-6)
 
 
+def resolve_toa_normalization_max(
+    values: np.ndarray, configured: float | None
+) -> float:
+    """以全部共享地图的有效范围统一缩放，排除墙体和不可达哨兵值。"""
+    if configured is not None:
+        if not np.isfinite(configured) or configured <= 0.0:
+            raise ValueError("TOA 归一化量程必须为有限正数")
+        return float(configured)
+    return _traversable_toa_max(values)
+
+
 def _toa_rgb(values: np.ndarray) -> np.ndarray:
     """使用蓝到红的 HSV 色相渐变渲染一张 TOA 图。"""
 
@@ -157,7 +170,12 @@ def save_toa_global_maps(
 
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
-    labels = ("route 1 forward", "route 1 reverse", "route 2 forward", "route 2 reverse")
+    labels = (
+        "route 1 forward",
+        "route 1 reverse",
+        "route 2 forward",
+        "route 2 reverse",
+    )
     tile_size = config.toa_grid_size
     label_height = 24
     gap = 8
@@ -185,19 +203,29 @@ def save_toa_global_maps(
             reversed_direction = bool(map_id % 2)
             route_start, route_goal = layout.routes[route_id]
             start, goal = (
-                (route_goal, route_start) if reversed_direction else (route_start, route_goal)
+                (route_goal, route_start)
+                if reversed_direction
+                else (route_start, route_goal)
             )
 
-            def pixel(point: tuple[float, float]) -> tuple[int, int]:
+            def pixel(
+                point: tuple[float, float], left: int = left, top: int = top
+            ) -> tuple[int, int]:
                 scale = (tile_size - 1) / (2.0 * config.arena_half_extent)
                 x = round((point[0] + config.arena_half_extent) * scale) + left
-                y = round((config.arena_half_extent - point[1]) * scale) + top + label_height
+                y = (
+                    round((config.arena_half_extent - point[1]) * scale)
+                    + top
+                    + label_height
+                )
                 return x, y
 
             for point, color in ((start, (0, 255, 255)), (goal, (255, 70, 70))):
                 x, y = pixel(point)
                 radius = max(3, tile_size // 100)
-                draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
+                draw.ellipse(
+                    (x - radius, y - radius, x + radius, y + radius), fill=color
+                )
 
         image_path = destination / f"{layout.name}_toa_global.png"
         data_path = destination / f"{layout.name}_toa_global.npz"

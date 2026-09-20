@@ -7,8 +7,8 @@ Critic 还能访问训练时特权信息 ``critic_toa``。这比依靠特征提�
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 import torch
 from torch import nn
@@ -25,7 +25,7 @@ class RecurrentState:
     actor: RecurrentStateTuple
     critic: RecurrentStateTuple
 
-    def detach(self) -> "RecurrentState":
+    def detach(self) -> RecurrentState:
         return RecurrentState(
             actor=tuple(tensor.detach() for tensor in self.actor),  # type: ignore[arg-type]
             critic=tuple(tensor.detach() for tensor in self.critic),  # type: ignore[arg-type]
@@ -178,6 +178,22 @@ class AsymmetricRecurrentActorCritic(nn.Module):
     def _distribution(self, latent: torch.Tensor) -> Normal:
         mean = self.action_mean(self.actor_mlp(latent))
         return Normal(mean, self.log_std.exp().expand_as(mean))
+
+    @torch.no_grad()
+    def act_actor(
+        self,
+        observation: Observation,
+        state: RecurrentState,
+        episode_starts: torch.Tensor,
+    ) -> tuple[torch.Tensor, RecurrentState]:
+        """确定性评估仅计算 Actor，不读取 Critic 的特权观测。"""
+        sequence = self._with_time_dimension(observation)
+        features = self.actor_encoder(sequence)
+        output, actor_state = self.actor_recurrent(
+            features, state.actor, episode_starts.unsqueeze(0)
+        )
+        action = self.action_mean(self.actor_mlp(output[0]))
+        return action, RecurrentState(actor_state, state.critic)
 
     @torch.no_grad()
     def act(

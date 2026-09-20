@@ -84,8 +84,8 @@ class EnvConfig:
     toa_safe_distance: float = 2.0
     # TOA 速度场贴近障碍物时采用的最低速度比例。
     toa_slow_speed: float = 0.2
-    # 将局部 TOA 观测归一化到 [-1, 1] 时的截断上限。
-    toa_normalization_max: float = 255.0
+    # None 使用全体静态地图的可通行最大值；数值配置兼容旧模型的固定量程。
+    toa_normalization_max: float | None = None
 
     # 动作三个分量的下界，依次为前向速度、侧向速度和偏航角速度。
     action_low: tuple[float, float, float] = (-0.1, -0.5, -1.0471975511965976)
@@ -132,6 +132,10 @@ class EnvConfig:
             raise ValueError("toa_grid_size 应为不小于 3 的奇数")
         if self.toa_safe_distance <= 0.0 or not 0.0 < self.toa_slow_speed <= 1.0:
             raise ValueError("TOA 安全距离必须为正，慢速比例必须位于 (0, 1]")
+        if self.toa_normalization_max is not None and not (
+            0.0 < self.toa_normalization_max < float("inf")
+        ):
+            raise ValueError("toa_normalization_max 必须为有限正数或 None")
         if self.random_cylinder_count <= 0:
             raise ValueError("random_cylinder_count 必须为正数")
         if self.random_cylinder_count > 60:
@@ -162,8 +166,14 @@ class EnvConfig:
             raise ValueError("每个动作下界都必须小于上界")
         if not 0.0 < self.contact_penalty_ramp_fraction <= 1.0:
             raise ValueError("contact_penalty_ramp_fraction 必须位于 (0, 1]")
-        if not 0.0 < self.minimum_contact_force_threshold <= self.collision_force_threshold:
-            raise ValueError("minimum_contact_force_threshold 必须为正数且不能大于 collision_force_threshold")
+        if (
+            not 0.0
+            < self.minimum_contact_force_threshold
+            <= self.collision_force_threshold
+        ):
+            raise ValueError(
+                "minimum_contact_force_threshold 必须为正数且不能大于 collision_force_threshold"
+            )
 
 
 @dataclass
@@ -277,5 +287,7 @@ class TrainConfig:
         if self.algorithm not in ("ppo", "recurrent_ppo"):
             raise ValueError("algorithm 必须是 ppo 或 recurrent_ppo")
         if (self.algorithm == "ppo") != (self.network.recurrent_type == "none"):
-            raise ValueError("普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元")
+            raise ValueError(
+                "普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元"
+            )
         self.ppo.validate(self.env.num_envs)

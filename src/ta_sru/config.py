@@ -49,15 +49,7 @@ class EnvConfig:
 
     # 先进行混合迷宫训练，再集中训练第四种 U 形墙壁布局，最后恢复六种混合迷宫。
     # 各课程阶段相对于总训练步数的起始比例。
-    training_curriculum_stage_fractions: tuple[float, ...] = (
-        0.0,
-        0.10,
-        0.20,
-        0.40,
-        0.50,
-        0.60,
-        0.95,
-    )
+    training_curriculum_stage_fractions: tuple[float, ...] = (0.0, 0.10)
     # 各课程阶段启用的迷宫布局数量。
     training_curriculum_maze_counts: tuple[int, ...] = (6, 6)
     # 各阶段连续启用的迷宫起始索引，从 0 开始；索引 3 对应第四种 U 形布局。

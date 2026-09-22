@@ -34,6 +34,7 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 
 from ta_sru.config import EnvConfig
+from ta_sru.envs.actions import unit_to_action
 from ta_sru.envs.contact import peak_contact_force
 from ta_sru.envs.curriculum import select_training_maze_curriculum_stage
 from ta_sru.envs.layouts import MAZE_LAYOUTS
@@ -210,9 +211,10 @@ class IsaacNavigationEnvCfg(DirectRLEnvCfg):
     debug_vis: bool = False
     decimation = 5
     episode_length_s = 40.0
+    # step() 接受的是 [-1, 1] 归一化动作，由 map_unit_actions 映射到物理范围。
     action_space = gym.spaces.Box(
-        low=np.asarray((-0.1, -0.5, -np.pi / 3), dtype=np.float32),
-        high=np.asarray((2.0, 0.5, np.pi / 3), dtype=np.float32),
+        low=np.asarray((-1.0, -1.0, -1.0), dtype=np.float32),
+        high=np.asarray((1.0, 1.0, 1.0), dtype=np.float32),
         dtype=np.float32,
     )
     # Isaac Lab 的 configclass 会复制实例配置，此字典不是共享运行状态。
@@ -253,8 +255,8 @@ def make_isaac_env_cfg(task: EnvConfig, sim_device: str) -> IsaacNavigationEnvCf
     cfg.scene.contact_forces.update_period = task.physics_dt
     cfg.scene.contact_forces.history_length = task.control_decimation
     cfg.action_space = gym.spaces.Box(
-        np.asarray(task.action_low, dtype=np.float32),
-        np.asarray(task.action_high, dtype=np.float32),
+        np.asarray((-1.0, -1.0, -1.0), dtype=np.float32),
+        np.asarray((1.0, 1.0, 1.0), dtype=np.float32),
         dtype=np.float32,
     )
     cfg.observation_space = {
@@ -521,11 +523,22 @@ class NavigationEnv(DirectRLEnv):
         )
         self.trajectory_visualizer.visualize(self._trajectory_history[valid])
 
+    def map_unit_actions(self, actions: torch.Tensor) -> torch.Tensor:
+        """把策略输出的 [-1, 1] 归一化动作线性映射到物理取值范围。
+
+        这是归一化动作唯一的映射点。越界输入按边界饱和，仅用于防御异常调用；
+        正常路径下策略输出已由 tanh 压缩到 [-1, 1]，不会触发。
+        """
+
+        return unit_to_action(
+            actions,
+            actions.new_tensor(self.task.action_low),
+            actions.new_tensor(self.task.action_high),
+        )
+
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.previous_actions.copy_(self.actions)
-        low = actions.new_tensor(self.task.action_low)
-        high = actions.new_tensor(self.task.action_high)
-        self.actions.copy_(actions.clamp(low, high))
+        self.actions.copy_(self.map_unit_actions(actions))
 
     def _apply_action(self) -> None:
         quaternion = self.robot.data.root_quat_w

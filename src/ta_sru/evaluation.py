@@ -29,8 +29,12 @@ def load_evaluation_policy(checkpoint: dict, device: str):
     import torch
 
     from ta_sru.config import NetworkConfig
-    from ta_sru.models.actor_critic import AsymmetricRecurrentActorCritic
+    from ta_sru.models.actor_critic import (
+        AsymmetricRecurrentActorCritic,
+        require_supported_action_transform,
+    )
 
+    require_supported_action_transform(checkpoint.get("action_transform"))
     values = checkpoint["config"]
     network = NetworkConfig(**values["network"])
     algorithm = values.get("algorithm", "recurrent_ppo")

@@ -15,10 +15,19 @@ from ta_sru.evaluation import (
     evaluation_outcome,
     load_evaluation_policy,
 )
-from ta_sru.models.actor_critic import AsymmetricRecurrentActorCritic
+from ta_sru.models.actor_critic import (
+    ACTION_TRANSFORM,
+    AsymmetricRecurrentActorCritic,
+)
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_legacy_checkpoint_without_action_transform_is_rejected(self):
+        # clamp 版本的 action_mean 输出物理量纲的无界均值，直接按 tanh 解释会得到
+        # 完全不同的动作，必须在加载阶段就报错。
+        with self.assertRaises(ValueError):
+            load_evaluation_policy({"config": {}}, "cpu")
+
     def test_actor_only_inference_matches_full_policy_and_resets(self):
         for recurrent_type in ("none", "sru-lstm", "sru-gru", "sru-lstm-gate", "lstm"):
             with self.subTest(recurrent_type=recurrent_type):
@@ -31,6 +40,7 @@ class EvaluationTests(unittest.TestCase):
                 )
                 reference = AsymmetricRecurrentActorCritic(config).eval()
                 checkpoint = {
+                    "action_transform": ACTION_TRANSFORM,
                     "config": {
                         "network": asdict(config),
                         "algorithm": "ppo"

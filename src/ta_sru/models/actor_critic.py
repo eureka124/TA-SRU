@@ -19,6 +19,26 @@ from ta_sru.models.recurrent import RecurrentStateTuple, build_recurrent
 
 Observation = Mapping[str, torch.Tensor]
 
+# 动作参数化方式的标识，写入 checkpoint 并在加载时校验。旧 checkpoint 的动作是
+# 无界高斯采样经环境 clamp，权重含义与 tanh 版本不同，不能直接复用。
+ACTION_TRANSFORM = "tanh"
+
+
+def require_supported_action_transform(value: str | None) -> None:
+    """拒绝加载动作参数化方式不一致的 checkpoint，避免静默产生错误动作。"""
+
+    if value == ACTION_TRANSFORM:
+        return
+    if value is None:
+        raise ValueError(
+            "checkpoint 没有动作参数化标识，属于 clamp 版本；其 action_mean 输出的是"
+            "物理量纲的无界均值，与当前 tanh 版本含义不同，不能直接加载。请使用"
+            "重新训练得到的 checkpoint。"
+        )
+    raise ValueError(
+        f"checkpoint 的动作参数化为 {value!r}，与当前 {ACTION_TRANSFORM!r} 不一致"
+    )
+
 
 @dataclass
 class RecurrentState:
@@ -100,10 +120,18 @@ class CriticEncoder(nn.Module):
 
 
 class AsymmetricRecurrentActorCritic(nn.Module):
-    """Actor/Critic 各自拥有编码器、可切换循环单元和 MLP。"""
+    """Actor/Critic 各自拥有编码器、可切换循环单元和 MLP。
+
+    Actor 输出的是 **归一化动作**：对角高斯采样经 tanh 压缩到 [-1, 1]，环境再线性
+    映射到 ``action_low``/``action_high``。缓冲区里存的就是这个 [-1, 1] 的动作，
+    因此 ``evaluate_sequences`` 能通过 atanh 精确还原采样值，训练和采样看到的是
+    同一个分布。
+    """
 
     action_size = 3
     robot_state_size = 8
+    # tanh 压缩的数值余量，保证 atanh 与 log(1 - a²) 在边界处仍然有限。
+    squash_epsilon = 1.0e-6
 
     def __init__(self, config: NetworkConfig) -> None:
         super().__init__()
@@ -175,9 +203,42 @@ class AsymmetricRecurrentActorCritic(nn.Module):
     def _with_time_dimension(observation: Observation) -> dict[str, torch.Tensor]:
         return {key: value.unsqueeze(0) for key, value in observation.items()}
 
+    def bounded_log_std(self) -> torch.Tensor:
+        """返回裁剪到 [log_std_min, log_std_max] 的可训练对数标准差。
+
+        熵奖励对 log_std 是单向推力，没有上限时动作噪声会一直增长；裁剪也让日志里
+        报告的 `train/std` 与实际生效的噪声一致。
+        """
+
+        return self.log_std.clamp(self.config.log_std_min, self.config.log_std_max)
+
     def _distribution(self, latent: torch.Tensor) -> Normal:
         mean = self.action_mean(self.actor_mlp(latent))
-        return Normal(mean, self.log_std.exp().expand_as(mean))
+        return Normal(mean, self.bounded_log_std().exp().expand_as(mean))
+
+    def _squash(self, raw_action: torch.Tensor) -> torch.Tensor:
+        """把无界高斯采样压缩到 [-1, 1]，两端留出数值余量。
+
+        环境负责把 [-1, 1] 线性映射到 action_low/action_high。这里用 tanh 而不是
+        直接 clamp：clamp 在边界外梯度恒为 1，策略把均值推出去以后仍会收到等效的
+        更新信号，动作噪声只会单向增大；tanh 的梯度随 |raw_action| 增大而衰减，
+        饱和区自然停止接受噪声。
+        """
+
+        limit = 1.0 - self.squash_epsilon
+        return torch.tanh(raw_action).clamp(-limit, limit)
+
+    def _squashed_log_probability(
+        self, distribution: Normal, squashed_action: torch.Tensor
+    ) -> torch.Tensor:
+        """对压缩后的动作求对数概率，并补上 tanh 的 Jacobian 修正。
+
+        采样和训练都必须走同一个入口，否则 log_probability 与实际执行的动作不一致。
+        """
+
+        raw_action = torch.atanh(squashed_action)
+        correction = torch.log1p(-squashed_action.square())
+        return (distribution.log_prob(raw_action) - correction).sum(dim=-1)
 
     @torch.no_grad()
     def act_actor(
@@ -193,7 +254,7 @@ class AsymmetricRecurrentActorCritic(nn.Module):
             features, state.actor, episode_starts.unsqueeze(0)
         )
         action = self.action_mean(self.actor_mlp(output[0]))
-        return action, RecurrentState(actor_state, state.critic)
+        return self._squash(action), RecurrentState(actor_state, state.critic)
 
     @torch.no_grad()
     def act(
@@ -203,7 +264,7 @@ class AsymmetricRecurrentActorCritic(nn.Module):
         episode_starts: torch.Tensor,
         deterministic: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, RecurrentState]:
-        """处理一个向量环境时间步。"""
+        """处理一个向量环境时间步。返回的 action 已压缩到 [-1, 1]。"""
 
         sequence = self._with_time_dimension(observation)
         starts = episode_starts.unsqueeze(0)
@@ -216,8 +277,9 @@ class AsymmetricRecurrentActorCritic(nn.Module):
             critic_features, state.critic, starts
         )
         distribution = self._distribution(actor_output[0])
-        action = distribution.mean if deterministic else distribution.sample()
-        log_probability = distribution.log_prob(action).sum(dim=-1)
+        raw_action = distribution.mean if deterministic else distribution.sample()
+        action = self._squash(raw_action)
+        log_probability = self._squashed_log_probability(distribution, action)
         value = self.value_head(self.critic_mlp(critic_output[0])).squeeze(-1)
         return action, value, log_probability, RecurrentState(actor_state, critic_state)
 
@@ -228,7 +290,11 @@ class AsymmetricRecurrentActorCritic(nn.Module):
         state: RecurrentState,
         episode_starts: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """评估 ``[时间, 序列, ...]`` 形式的训练批次。"""
+        """评估 ``[时间, 序列, ...]`` 形式的训练批次。
+
+        ``action`` 是采样时存下来的、已经 tanh 压缩到 [-1, 1] 的动作；这里通过
+        atanh 还原成高斯采样值再求对数概率。
+        """
 
         actor_features = self.actor_encoder(observation)
         critic_features = self.critic_encoder(observation)
@@ -239,7 +305,7 @@ class AsymmetricRecurrentActorCritic(nn.Module):
             critic_features, state.critic, episode_starts
         )
         distribution = self._distribution(actor_output)
-        log_probability = distribution.log_prob(action).sum(dim=-1)
+        log_probability = self._squashed_log_probability(distribution, action)
         entropy = distribution.entropy().sum(dim=-1)
         value = self.value_head(self.critic_mlp(critic_output)).squeeze(-1)
         return value, log_probability, entropy

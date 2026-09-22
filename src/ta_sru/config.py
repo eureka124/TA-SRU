@@ -176,8 +176,17 @@ class NetworkConfig:
     actor_hidden_sizes: tuple[int, ...] = (512, 512)
     # Critic 在循环网络之后各全连接隐藏层的宽度。
     critic_hidden_sizes: tuple[int, ...] = (512, 512)
-    # 高斯动作分布可训练对数标准差的初始值。
-    initial_log_std: float = 0.0
+    # 高斯动作分布可训练对数标准差的初始值。动作经 tanh 压缩到 [-1, 1] 后再由
+    # 环境线性映射到 action_low/action_high，三个通道的尺度因此一致，不需要分通道
+    # 设置。-1.0 对应 σ≈0.37，归一化空间里约探索 ±0.35；取 0.0（σ=1.0）会让初始
+    # 采样铺满整个动作范围，动作噪声相对于可用的控制精度过大。
+    initial_log_std: float = -1.0
+    # 可训练对数标准差的上下限。熵奖励对 log_std 是单向推力：动作饱和后策略梯度
+    # 对该通道几乎没有信号，熵项就会稳定地把噪声推大。tanh 压缩限制了动作的后果，
+    # 但不会阻止 log_std 自身发散，因此需要显式上限。0.0 对应 σ=1.0，即本项目已经
+    # 验证过偏大的那个噪声水平；下限只防止 σ 塌缩到接近确定性。
+    log_std_min: float = -5.0
+    log_std_max: float = 0.0
     # 仅作接口预留：当前实现明确保持 Actor/Critic 深度编码器相互独立。
     share_depth_encoder: bool = False
 
@@ -190,6 +199,10 @@ class NetworkConfig:
             raise ValueError("feature_dim 和 recurrent_hidden_size 必须为正数")
         if self.recurrent_layers <= 0:
             raise ValueError("recurrent_layers 必须为正数")
+        if self.log_std_min >= self.log_std_max:
+            raise ValueError("log_std_min 必须小于 log_std_max")
+        if not self.log_std_min <= self.initial_log_std <= self.log_std_max:
+            raise ValueError("initial_log_std 必须位于 [log_std_min, log_std_max] 内")
 
 
 @dataclass

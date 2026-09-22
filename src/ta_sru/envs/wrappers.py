@@ -1,7 +1,8 @@
 """Isaac Lab 与本项目训练器之间的轻量 wrapper。
 
 这里没有继承或导入 SB3 wrapper。Isaac Lab 环境本身会在 ``step`` 内自动重置，本类
-只负责动作边界、设备转换、终止信息和 NumPy 接口。
+只负责设备转换、终止信息和 NumPy 接口。动作是 [-1, 1] 的归一化值，映射到物理
+取值范围由环境完成，wrapper 不再做任何边界处理。
 """
 
 from __future__ import annotations
@@ -20,8 +21,6 @@ class IsaacLabWrapper:
         self.env = env
         self.num_envs = env.num_envs
         self.sim_device = torch.device(env.device)
-        self.action_low = np.asarray(env.task.action_low, dtype=np.float32)
-        self.action_high = np.asarray(env.task.action_high, dtype=np.float32)
 
     @staticmethod
     def _host_observation(observation: dict[str, torch.Tensor]) -> dict[str, np.ndarray]:
@@ -73,8 +72,10 @@ class IsaacLabWrapper:
         if isinstance(actions, torch.Tensor):
             action_tensor = actions.to(device=self.sim_device, dtype=torch.float32)
         else:
-            bounded = np.clip(np.asarray(actions, dtype=np.float32), self.action_low, self.action_high)
-            action_tensor = torch.from_numpy(bounded).to(self.sim_device)
+            # 动作是 [-1, 1] 的归一化值，映射到物理范围由环境负责，这里只做类型转换。
+            action_tensor = torch.from_numpy(
+                np.asarray(actions, dtype=np.float32)
+            ).to(self.sim_device)
         observation, reward, terminated, truncated, extras = self.env.step(action_tensor)
         host_observation = self._host_observation(observation["policy"])
         terminated_host = terminated.detach().cpu().numpy()

@@ -4,7 +4,11 @@ from dataclasses import asdict
 from pathlib import Path
 import torch
 from ta_sru.config import NetworkConfig
-from ta_sru.models.actor_critic import AsymmetricRecurrentActorCritic
+from ta_sru.models.actor_critic import (
+    ACTION_TRANSFORM,
+    AsymmetricRecurrentActorCritic,
+    require_supported_action_transform,
+)
 
 ACTOR_PREFIXES = ("actor_encoder.", "actor_recurrent.", "actor_mlp.", "action_mean.")
 ENV_KEYS = (
@@ -21,6 +25,7 @@ ENV_KEYS = (
 
 def export_actor(checkpoint_path, output_path):
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    require_supported_action_transform(checkpoint.get("action_transform"))
     config = checkpoint["config"]
     network = NetworkConfig(**config["network"])
     network.validate()
@@ -31,7 +36,10 @@ def export_actor(checkpoint_path, output_path):
     model.load_state_dict(checkpoint["policy"], strict=True)
     artifact = {
         "format": "ta_sru_actor",
-        "version": 1,
+        # version 2：Actor 输出改为 [-1, 1] 的归一化动作（tanh 压缩），消费方需按
+        # observation.action_low/action_high 线性映射后才得到物理量纲的控制量。
+        "version": 2,
+        "action_transform": ACTION_TRANSFORM,
         "algorithm": algorithm,
         "network": asdict(network),
         "observation": {key: config["env"][key] for key in ENV_KEYS},

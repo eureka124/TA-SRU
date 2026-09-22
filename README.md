@@ -40,6 +40,7 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 | `src/ta_sru/evaluation.py` | 独立于仿真的评估配置、终局分类、每种布局的样本配额及汇总计算；作为包内模块供 `scripts/play.py` 和测试导入，无需单独运行。 |
 | `src/ta_sru/envs/layouts.py` | `maze_01` 至 `maze_06` 的墙体位置、方向和两组起终点路线。 |
 | `src/ta_sru/envs/curriculum.py` | 根据累计训练 transition 数选择布局范围和活动圆柱数量。 |
+| `src/ta_sru/envs/actions.py` | 把 Actor 输出的 [-1, 1] 归一化动作线性映射到物理动作范围。 |
 | `src/ta_sru/envs/contact.py` | 计算当前策略步所有物理子步、所有机体部件的接触力峰值。 |
 | `src/ta_sru/envs/navigation.py` | Isaac Lab 场景、传感器、动作执行、观测、奖励、终止和重置逻辑。 |
 | `src/ta_sru/envs/wrappers.py` | 将仿真接口转换为 PPO 使用的 NumPy 观测、奖励、终止标记和 episode 信息。 |
@@ -375,12 +376,21 @@ python scripts/play.py runs/<运行名>/checkpoints/model_best.pt \
 
 ```text
 Isaac Sim / PhysX → NavigationEnv → IsaacLabWrapper → PPO
-深度图 + 8 维机体状态 → Actor → 目标前向速度、侧向速度、偏航角速度
+深度图 + 8 维机体状态 → Actor → 归一化动作（[-1, 1]）
+归一化动作 → NavigationEnv.map_unit_actions → 目标前向速度、侧向速度、偏航角速度
 深度图 + 机体状态 + 局部 TOA → Critic → 状态价值
 策略动作 → Lee 控制器 → 无人机物理运动
 ```
 
+Actor 输出的是**归一化动作**：对角高斯采样经 tanh 压缩到 [-1, 1]，再由 `envs/actions.py:unit_to_action` 线性映射到 `action_low`/`action_high`。映射后 -1 对应下界、0 对应区间中点、+1 对应上界，三个通道的尺度因此一致。rollout buffer 里存的就是这个 [-1, 1] 的动作，`evaluate_sequences` 通过 atanh 精确还原采样值，所以采样和训练看到的是同一个分布。
+
+用 tanh 而不是直接 clamp 是有意的：clamp 在边界外梯度恒为 1，策略把均值推出动作范围后仍会收到等效的更新信号，而 tanh 的梯度随偏离增大而衰减，动作的后果被限制在范围内。
+
+动作噪声由 `initial_log_std`（默认 -1.0，σ≈0.37）和 `log_std_min`/`log_std_max`（默认 -5.0 / 0.0）共同控制。上限是必需的：熵奖励对 `log_std` 是单向推力，动作饱和后策略梯度对该通道几乎没有信号，熵项就会稳定地把噪声推大，tanh 只限制动作的后果、不阻止 `log_std` 发散。上限 0.0 对应 σ=1.0，即本项目已验证过偏大的那个噪声水平。日志里的 `train/std` 报告的是裁剪后实际生效的值。
+
 默认物理频率为 120 Hz，每 5 个物理步执行一次策略决策，即 24 Hz。Actor 与 Critic 使用独立编码器。修改布局看 `envs/layouts.py`，修改奖励/终止看 `envs/navigation.py`，修改网络看 `models/actor_critic.py`、`models/recurrent.py` 和 `NetworkConfig`；`share_depth_encoder=True` 当前尚未实现。
+
+checkpoint 保存了动作参数化标识，加载时会校验。**clamp 版本的旧 checkpoint 无法用于当前代码**：其 `action_mean` 输出的是物理量纲的无界均值，按 tanh 解释会得到完全不同的动作，`train.py --resume`、`play.py` 和 `export_actor.py` 都会直接报错，请使用重新训练得到的 checkpoint。
 
 Lee 控制器在机体系力矩中加入 `Ω × (JΩ)`，补偿刚体方程的陀螺耦合。接触历史检测及控制器修复会改变旧 checkpoint 的仿真轨迹和结局；与修复前的评估结果比较时，请同时记录代码版本。
 
@@ -393,6 +403,8 @@ python scripts/export_actor.py \
 ```
 
 输出为项目定义的 PyTorch 权重与配置字典，不是 TorchScript 或 ONNX，也不是 `play.py` 接受的完整训练 checkpoint。
+
+当前导出格式 `version` 为 2：`action_transform` 为 `tanh`，`actor/action_mean.*` 输出的是 [-1, 1] 归一化动作，消费方需要按同文件 `observation.action_low` / `observation.action_high` 线性映射后才得到物理量纲的控制量（-1 → low，0 → 中点，+1 → high）。version 1 的导出产物是 clamp 版本的无界均值，两者不可混用。
 
 ## 8. 验证与第三方来源
 

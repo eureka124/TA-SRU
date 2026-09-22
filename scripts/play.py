@@ -177,7 +177,9 @@ def main() -> int:
                     torch.as_tensor(episode_starts, device=policy.device),
                 )
             if debug_recorder is not None:
-                debug_recorder.begin_step(env.env, action)
+                # 策略输出 [-1, 1] 归一化动作，回放里 requested 与 applied 统一用
+                # 物理量纲，映射后再记录。
+                debug_recorder.begin_step(env.env, env.env.map_unit_actions(action))
             # 在自动重置前保留本回合布局，避免终局归入下一回合。
             maze_ids = env.env.maze_ids.detach().cpu().tolist()
             observation, reward, terminated, truncated, infos = env.step(action)

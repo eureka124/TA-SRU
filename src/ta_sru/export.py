@@ -4,7 +4,10 @@ from dataclasses import asdict
 from pathlib import Path
 import torch
 from ta_sru.config import NetworkConfig
-from ta_sru.models.actor_critic import AsymmetricRecurrentActorCritic
+from ta_sru.models.actor_critic import (
+    AsymmetricRecurrentActorCritic,
+    require_supported_action_transform,
+)
 
 ACTOR_PREFIXES = ("actor_encoder.", "actor_recurrent.", "actor_mlp.", "action_mean.")
 ENV_KEYS = (
@@ -21,6 +24,7 @@ ENV_KEYS = (
 
 def export_actor(checkpoint_path, output_path):
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    require_supported_action_transform(checkpoint.get("action_transform"))
     config = checkpoint["config"]
     network = NetworkConfig(**config["network"])
     network.validate()

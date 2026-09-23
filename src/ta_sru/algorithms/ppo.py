@@ -17,7 +17,12 @@ from tqdm.auto import tqdm
 
 from ta_sru.algorithms.buffer import CpuRolloutBuffer, CpuFeedForwardBuffer
 from ta_sru.config import TrainConfig
-from ta_sru.models.actor_critic import AsymmetricRecurrentActorCritic, RecurrentState
+from ta_sru.models.actor_critic import (
+    ACTION_TRANSFORM,
+    AsymmetricRecurrentActorCritic,
+    RecurrentState,
+    require_supported_action_transform,
+)
 
 ObservationArray = dict[str, np.ndarray]
 
@@ -488,6 +493,7 @@ class RecurrentPPO:
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
+                "action_transform": ACTION_TRANSFORM,
                 "policy": self.policy.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
                 "timesteps": self.timesteps,
@@ -506,6 +512,7 @@ class RecurrentPPO:
         checkpoint: dict[str, Any] = torch.load(
             path, map_location=self.device, weights_only=True
         )
+        require_supported_action_transform(checkpoint.get("action_transform"))
         saved_algorithm = checkpoint["config"].get("algorithm", "recurrent_ppo")
         if saved_algorithm != self.config.algorithm:
             raise ValueError(

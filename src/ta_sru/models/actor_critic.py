@@ -19,6 +19,29 @@ from ta_sru.models.recurrent import RecurrentStateTuple, build_recurrent
 
 Observation = Mapping[str, torch.Tensor]
 
+# 动作参数化方式的标识，写入 checkpoint 并在加载时校验。
+# 本分支的策略直接输出物理量纲的无界高斯采样，边界由环境的 clamp 施加；main 分支
+# 输出的是经 tanh 压缩的归一化动作。两者的 action_mean 权重含义不同，不能互相加载。
+ACTION_TRANSFORM = "clamp"
+
+
+def require_supported_action_transform(value: str | None) -> None:
+    """拒绝加载动作参数化方式不一致的 checkpoint，避免静默产生错误动作。"""
+
+    if value == ACTION_TRANSFORM or value is None:
+        # 缺少标识的 checkpoint 来自引入该标识之前，属于 clamp 版本，可以加载。
+        return
+    if value == "tanh":
+        raise ValueError(
+            "checkpoint 使用 tanh 压缩动作（main 分支）：其 action_mean 输出的是"
+            "归一化动作，环境再线性映射到 action_low/action_high。本分支直接输出"
+            "物理量纲的动作，两者权重含义不同，不能加载。请改用 main 分支评估，"
+            "或在当前分支重新训练。"
+        )
+    raise ValueError(
+        f"checkpoint 的动作参数化为 {value!r}，与当前 {ACTION_TRANSFORM!r} 不一致"
+    )
+
 
 @dataclass
 class RecurrentState:

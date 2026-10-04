@@ -1,6 +1,6 @@
 # TA-SRU
 
-TA-SRU 使用 Isaac Sim、Isaac Lab 和 PyTorch 训练 Hummingbird 无人机导航策略。无人机在六种墙体布局及随机圆柱障碍中，从起点飞到目标点。支持普通 PPO，以及使用 SRU-LSTM、SRU-GRU、SRU-LSTM-Gate 或 LSTM 的循环 PPO。
+TA-SRU 使用 Isaac Sim、Isaac Lab 和 PyTorch 训练 Hummingbird 无人机导航策略。无人机在启动时生成的 DFS＋随机拆墙地图池中，从起点飞到目标点。支持普通 PPO，以及使用 SRU-LSTM、SRU-GRU、SRU-LSTM-Gate 或 LSTM 的循环 PPO。
 
 本文中的命令均在**项目根目录**执行。路径中的 `<运行名>`、`<时间戳>` 等占位符需要替换为实际值。
 
@@ -27,8 +27,9 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 
 | 文件 | 用途 |
 | --- | --- |
+| `scripts/check_dfs_scene.py` | 用两个小型环境检查共享场景、传感器及回合重置。 |
 | `scripts/train.py` | 新建或恢复训练，启动仿真，创建运行目录，保存配置、日志和 checkpoint。 |
-| `scripts/play.py` | 加载命令行指定的 checkpoint，运行六种布局的评估，保存统计及可选回放。 |
+| `scripts/play.py` | 加载命令行指定的 checkpoint，运行独立 DFS 地图池的评估，保存统计及可选回放。 |
 | `scripts/progress_to_tensorboard.py` | 将已有训练 `progress.csv` 回填为 TensorBoard 事件。 |
 | `scripts/export_actor.py` | 从训练 checkpoint 导出只包含 Actor 权重及相关配置的 PyTorch 文件，无需启动仿真。 |
 
@@ -37,9 +38,10 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 | 文件 | 用途 |
 | --- | --- |
 | `src/ta_sru/config.py` | `EnvConfig`、`NetworkConfig`、`PPOConfig`、`TrainConfig` 默认值和合法性检查。命令行未开放的设置在这里调整。 |
-| `src/ta_sru/evaluation.py` | 独立于仿真的评估配置、终局分类、每种布局的样本配额及汇总计算；作为包内模块供 `scripts/play.py` 和测试导入，无需单独运行。 |
-| `src/ta_sru/envs/layouts.py` | `maze_01` 至 `maze_06` 的墙体位置、方向和两组起终点路线。 |
-| `src/ta_sru/envs/curriculum.py` | 根据累计训练 transition 数选择布局范围和活动圆柱数量。 |
+| `src/ta_sru/evaluation.py` | 独立于仿真的评估配置、终局分类、每张地图的样本配额及汇总计算；作为包内模块供 `scripts/play.py` 和测试导入，无需单独运行。 |
+| `src/ta_sru/envs/maze.py` | DFS 生成、随机拆墙、地图内容去重及共用物理/射线几何。 |
+| `src/ta_sru/scene_config.py` | 恢复环境配置及兼容性检查。 |
+| `src/ta_sru/envs/toa_sampling.py` | 有效性检查、共享 TOA 采样与起点归一化奖励。 |
 | `src/ta_sru/envs/contact.py` | 计算当前策略步所有物理子步、所有机体部件的接触力峰值。 |
 | `src/ta_sru/envs/navigation.py` | Isaac Lab 场景、传感器、动作执行、观测、奖励、终止和重置逻辑。 |
 | `src/ta_sru/envs/wrappers.py` | 将仿真接口转换为 PPO 使用的 NumPy 观测、奖励、终止标记和 episode 信息。 |
@@ -62,8 +64,9 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 | --- | --- |
 | `assets/hummingbird/hummingbird.usd` | 无人机仿真模型资产。 |
 | `assets/hummingbird/hummingbird.yaml` | 无人机物理及控制参数。 |
-| `tests/test_evaluation.py` | 检查固定评估课程、结局优先级和每种布局配额。 |
+| `tests/test_evaluation.py` | 检查独立评估池配置、结局优先级和每张地图配额。 |
 | `tests/test_playback.py` | 检查原始深度、视频编码、并行回合隔离及回放保存上限。 |
+| `tests/test_dfs.py` | DFS 树结构、几何、缓存、点目标 TOA、归一化奖励及恢复校验。 |
 | `tests/test_core.py` | 网络、控制器惯性补偿、接触历史、TOA 归一化、buffer、PPO 更新和日志测试。 |
 | `pyproject.toml` | Python 包信息、依赖及打包配置。 |
 | `.gitignore` | 排除运行产物、缓存等；部分本地 shell 脚本也被忽略。 |
@@ -71,20 +74,18 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 | `THIRD_PARTY_NOTICES.md` | 控制器及 SRU 实现的第三方来源和许可证。 |
 | `runs/` | 训练日志、checkpoint、评估统计和 debug 回放，通常不纳入 Git。 |
 
-以下四个启动脚本纳入版本管理，使用当前已激活的 Python 环境，自动切换到项目根目录并转发追加参数。它们以前台进程运行，可自行放入 tmux/screen；追加的同名参数覆盖预设值。
-
-| 本地脚本 | 用途及当前注意事项 |
-| --- | --- |
-| `train.sh` | 循环 PPO 默认 6 个环境、512 步 rollout、1024 batch size；如 `./train.sh --headless --recurrent-type lstm`。 |
-| `ppo_train.sh` | 普通 PPO 默认 6 个环境、512 batch size；如 `./ppo_train.sh --headless`。 |
-| `play.sh` | checkpoint 由参数指定；如 `./play.sh runs/<运行名>/checkpoints/model_best.pt --headless --debug`。 |
-| `tensorboard.sh` | 前台启动 TensorBoard，默认日志目录 `runs/`、端口 6006。 |
-
-本地 `rsync.sh` 可能包含机器专用地址，仍被忽略；如需使用，请自行检查远端和文件筛选规则。
+HXY 的训练参数可直接写在本地 shell 脚本中。脚本需先激活 Isaac Lab 环境；本地 shell 脚本可能包含机器专用设置，使用前检查其内容。
 
 ## 3. 如何训练
 
 ### 先进行短训练检查
+
+激活 Isaac Lab 环境后，可先运行独立的场景检查：
+
+```bash
+python scripts/check_dfs_scene.py --headless --device cuda:0
+```
+
 
 以下配置用于确认环境能创建、采样和更新，不用于比较模型性能：
 
@@ -93,7 +94,7 @@ python scripts/train.py \
   --headless --device cuda:0 --network-device cuda:0 \
   --num-envs 2 --total-timesteps 1024 \
   --rollout-steps 32 --batch-size 32 --sequence-length 8 \
-  --recurrent-type sru-lstm --toa-grid-size 51 --cylinders 8
+  --recurrent-type sru-lstm --maze-size 7 --train-map-count 2 --eval-map-count 2 --goals-per-map 2 --toa-resolution 0.2
 ```
 
 ### 正式训练
@@ -106,7 +107,7 @@ python scripts/train.py \
   --algorithm recurrent_ppo --recurrent-type sru-lstm \
   --num-envs 6 --total-timesteps 70000000 \
   --rollout-steps 512 --batch-size 512 --sequence-length 64 \
-  --toa-grid-size 401 --cylinders 60 --log-dir runs
+  --toa-resolution 0.1 --log-dir runs
 ```
 
 `--recurrent-type` 可选 `sru-lstm`、`sru-gru`、`sru-lstm-gate`、`lstm`。未指定算法时默认使用循环 PPO，未指定循环单元时默认使用 `sru-lstm`。
@@ -117,7 +118,7 @@ python scripts/train.py \
 python scripts/train.py \
   --headless --device cuda:0 --network-device cuda:0 \
   --algorithm ppo --num-envs 6 --total-timesteps 70000000 \
-  --rollout-steps 512 --batch-size 512 --toa-grid-size 401 --cylinders 60
+  --rollout-steps 512 --batch-size 512 --toa-resolution 0.1
 ```
 
 ### 常用训练参数
@@ -130,8 +131,16 @@ python scripts/train.py \
 | `--batch-size` | `512` | 训练批次大小，不能超过 `rollout_steps × num_envs`。 |
 | `--sequence-length` | `64` | 循环 PPO 的训练序列长度。 |
 | `--seed` | `123` | 随机种子。 |
-| `--cylinders` | `60` | 随机圆柱槽位上限，实际活动数量还受课程控制。 |
-| `--toa-grid-size` | `401` | 全局 TOA 网格边长。 |
+| `--maze-seed` | `123` | 地图生成种子，与回合/网络随机流隔离。 |
+| `--train-map-count` / `--eval-map-count` | `64` / `16` | 训练与独立评估的地图数量，内容不重叠。 |
+| `--goals-per-map` | `8` | 每张地图预采样并缓存 TOA 的目标数量。 |
+| `--maze-size` / `--maze-cell-size` | `15` / `2.0` | 包含外墙的奇数网格尺寸及每格米数。 |
+| `--maze-wall-removal-probability` | `0.25` | DFS 后每条剩余内部隔墙的拆除概率。 |
+| `--toa-resolution` | `0.1` | 期望 TOA 米制栅格间距；默认生成 301×301 图。 |
+| `--toa-cache-dir` | `.cache/dfs_toa` | 可复用磁盘缓存，损坏项自动重建；无法写入时仍用内存缓存。 |
+| `--min-start-goal-distance` | `4.0` | 起终点最小水平直线距离，米。 |
+| `--safety-margin` / `--spawn-margin` | `0.1` / `0.1` | 障碍膨胀及额外出生余量，米。 |
+| `--episode-seconds` | `40` | 回合时长，秒；长绕行路径是否适配需通过短检查评估。 |
 | `--toa-normalization-max` | 新训练自动计算 | Critic 的固定 TOA 量程；省略时新训练使用静态地图的可通行最大值，恢复训练沿用 checkpoint。 |
 | `--network-device` | 跟随 `--device` | 网络设备；`--device` 指定仿真设备。 |
 | `--log-dir` | `runs` | 日志根目录。 |
@@ -152,36 +161,30 @@ python scripts/train.py \
   --headless --device cuda:0 --network-device cuda:0 \
   --num-envs 6 --total-timesteps 70000000 \
   --rollout-steps 512 --batch-size 512 --sequence-length 64 \
-  --toa-grid-size 401 --cylinders 60
+  --toa-resolution 0.1
 ```
 
 恢复时加载模型、优化器、训练步数、网络结构和历史最佳回报。算法及循环单元从 checkpoint 推断，不能切换。
 
-**环境和 PPO 配置仍由本次命令及默认值构建**，不会全部沿用 checkpoint。请参照原运行的 `config.json` 和 `command.txt` 传入原参数。`--total-timesteps` 是包含已训练步数的总目标；恢复会创建新的运行目录，不会继续向旧目录追加日志。
+**环境配置完整继承 checkpoint**。CLI 缺省值不会覆盖已保存地图参数；显式更改地图、目标、TOA 或奖励定义会报错。运行设备、环境数、日志位置及缓存路径可以调整。PPO 批次参数仍由本次命令配置；`--total-timesteps` 是包含已训练步数的总目标。恢复会创建新的运行目录。
 
-TOA 归一化量程作为输入编码的一部分，恢复时默认保留 checkpoint 的值；旧 checkpoint 缺少该字段时按 255 处理。显式传入 `--toa-normalization-max` 才覆盖它。
+checkpoint 保存场景/生成器/TOA 版本、两个地图池及目标摘要和训练 TOA 观测量程。恢复时重新生成并核验，拒绝旧布局 checkpoint；恢复会开启新回合，不保证从中断的物理状态逐帧续演。
 
 ### 训练课程与指标
 
-默认课程按总训练进度启用不同布局和圆柱数量：
+地图池在启动时按种子生成，默认训练 64 张、评估 16 张，每图 8 个目标。重置时随机选择训练地图与目标，并从同一可达分量采样合法起点，初始朝向目标、速度清零。目标坐标不抖动。场景只包含平地和墙体，碰撞与相机使用同一静态网格。
 
-| 训练进度 | 布局 | 活动圆柱数上限 |
-| --- | --- | --- |
-| 0%–10% | maze_01–03 | 10 |
-| 10%–20% | maze_01–04 | 10 |
-| 20%–40% | maze_01–05 | 10 |
-| 40%–50% | maze_01–05 | 30 |
-| 50%–60% | 全部六种 | 60 |
-| 60%–95% | maze_04 | 60 |
-| 95% 以后 | 全部六种 | 60 |
-
-布局在 episode 重置时切换；圆柱数量不超过 `--cylinders`。碰撞接触力阈值在前 40% 训练进度从 50 N 线性减至 0.1 N，随后保持不变。
+接触课程保留：碰撞力阈值在前 40% 训练进度从 50 N 线性减至 0.1 N，接触惩罚同步渐增。
 
 接触检测和接触惩罚都取当前策略步全部物理子步、全部机体部件的最大接触力，不再只看最后一个子步。历史窗口随 `control_decimation` 调整，避免漏掉碰撞后弹开的短暂接触，也避免重复计入上一策略步。回合重置会清零当前及历史动作缓存。
 
-新训练的 Critic TOA 输入使用全部 24 张静态地图的统一可通行最大值归一化，排除墙体/不可达哨兵值，输出截断到 [-1,1]；墙体保持 +1。此缩放不改变 TOA 进度奖励的原始量纲。静态地图只建模墙体，不包含每回合随机圆柱，因此它提供全局路径引导，不是真实场景的完整最短路代价；圆柱仍由深度观测和物理碰撞反映。
+Critic 的 16×16 TOA 输入使用训练池的统一有效最大值归一化到 [-1,1]，不可达和越界像素为 +1；独立评估沿用训练尺度。Actor 不接收 TOA。
 
-当前训练达到碰撞阈值即终止。训练日志按“成功优先、其次碰撞、其余超时”分类，越界也可能被归为超时。TensorBoard 的 `Metrics/*` 使用最近 100 个已完成 episodes；这些训练指标与后文独立评估的固定场景及分类口径不同。
+TOA 进度奖励为 `weight × (T_previous − T_current) / T_start`。每回合分母固定为起点到目标点的 FMM 到达时间，包含近墙降速；不使用旧差分裁剪。首步以起点 TOA 建立历史，无效采样切断差分。**目标点 TOA 为零，成功使用 0.4 m 水平半径**；成功时不强制清零剩余 TOA、不补发进度，成功奖励独立计算。
+
+TOA 数组按地图/目标共享，不随环境数复制。默认训练池 float32 TOA 约 176.96 MiB，另有 CPU 起点候选、几何、临时数组及 GPU 副本；启动打印实际池大小和 TOA 分布。HXY 的启动时间、相机/碰撞和 2048 环境规模需要单独验收。
+
+当前训练达到碰撞阈值即终止。训练日志按“成功优先、其次碰撞、其余超时”分类，越界也可能被归为超时。TensorBoard 的 `Metrics/*` 使用最近 100 个已完成 episodes；这些训练指标与后文独立评估的独立地图池及分类口径不同。
 
 ## 4. 训练产物在哪里、如何查看
 
@@ -202,7 +205,7 @@ runs/<算法或循环单元>_<时间戳或运行名>/
 │   └── model_interrupted_*.pt  # Ctrl+C 中断时保存
 ├── evaluation/
 │   └── eval_<时间戳>/
-│       ├── summary.json        # 分布局与整体统计
+│       ├── summary.json        # 分地图与整体统计
 │       └── episodes.csv        # 逐回合评估明细
 └── debug/
     ├── ...                     # 全局 TOA 的 PNG / NPZ
@@ -230,7 +233,7 @@ tensorboard --logdir runs --port 6006
 | `rollout/ep_rew_mean`、`rollout/ep_len_mean` | 最近最多 100 个完整回合的平均回报和长度。 |
 | `Metrics/Success_Rate`、`Metrics/Collision_Rate`、`Metrics/Timeout_Rate` | 最近最多 100 个完整训练回合的结局比例。 |
 | `train/*` | PPO 损失、KL、裁剪比例等。 |
-| `progress/*` | CSV 对应指标，包括训练步数、课程阶段、活动布局/圆柱数和接触力阈值。 |
+| `progress/*` | CSV 对应指标，包括训练步数、接触惩罚比例和接触力阈值。 |
 
 `progress.csv` 的 `episodes` 是累计完成数量，`success/collision/timeout` 是本次日志区间的计数。已有 CSV 可回填 TensorBoard：
 
@@ -256,25 +259,25 @@ python scripts/play.py runs/<运行名>/checkpoints/model_best.pt \
 
 评估直接加载网络，不创建 PPO 训练器、优化器或 rollout buffer；每步仅执行 Actor 前向，不计算 Critic。环境仍生成 TOA 以计算回报。
 
-评估固定使用 `layouts.py` 的全部六种布局，不沿用训练课程阶段。圆柱数量采用 checkpoint 最终课程的数量，并受其圆柱槽位上限约束；碰撞阈值固定为 **0.1 N**。
+评估使用 checkpoint 定义的独立地图池，默认 16 张，碰撞阈值固定为 **0.1 N**。地图和目标池的生成与训练使用相同版本及参数，内容摘要必须匹配 checkpoint。
 
-默认**每种布局统计 1000 个完整 episodes，共 6000 个，达到配额后自动退出**。`--num-envs` 至少为 6，建议为 6 的倍数；增加实例数不会增加每种布局的统计配额。某布局满额后，该布局额外完成的回合不计入统计。
+默认每张地图统计 1000 个完整回合，共 16000 个。回合开始即预留配额，单个环境也能轮转覆盖全部地图；已分配完配额后的空闲回合不计入统计。
 
 先用小样本检查整个评估流程：
 
 ```bash
 python scripts/play.py runs/<运行名>/checkpoints/model_best.pt \
-  --headless --device cuda:0 --num-envs 6 --episodes-per-layout 2
+  --headless --device cuda:0 --num-envs 6 --episodes-per-map 2
 ```
 
-以上只统计 12 个回合，不适合用于正式性能比较。
+默认评估池下以上只统计 32 个回合，不适合用于正式性能比较。
 
 | 参数 | 含义 |
 | --- | --- |
 | `checkpoint` | 必填的位置参数，指定完整训练 checkpoint。 |
-| `--episodes-per-layout` | 每种布局的完整回合目标数，默认 1000。 |
-| `--num-envs` | 并行实例数，默认 6，至少 6。 |
-| `--debug` | 按开始顺序预选每种布局中间 4 个完整回合保存回放；默认第 499–502 个。 |
+| `--episodes-per-map` | 每张地图的完整回合目标数，默认 1000。 |
+| `--num-envs` | 并行实例数，默认 6，至少 1。 |
+| `--debug` | 按开始顺序预选每张地图中间 4 个完整回合保存回放；默认第 499–502 个。 |
 | `--steps` | 可选的向量步数上限；达到后提前退出，不保证回合配额完成。 |
 | `--output-dir` | 自定义统计输出目录，必须是尚不存在的新目录；不改变 debug 保存路径。 |
 | `--device`、`--network-device` | 仿真与网络设备。 |
@@ -296,7 +299,7 @@ runs/<运行名>/evaluation/eval_<时间戳>/
 
 ### 查看成功率、碰撞率、超时率
 
-评估完成或提前结束时，终端会以表格展示六种布局及整体的回合数、三类结局的数量和比例。
+评估完成或提前结束时，终端会以表格展示所有评估地图及整体的回合数、三类结局的数量和比例。
 比例显示为保留两位小数的百分比；尚无完整回合时显示 `—`。JSON 中仍保存原始精度的数据。
 
 ```bash
@@ -308,13 +311,14 @@ python -m json.tool runs/<运行名>/evaluation/eval_<时间戳>/summary.json
 | 字段 | 含义 |
 | --- | --- |
 | `checkpoint` | 本次评估模型的绝对路径。 |
-| `num_envs`、`cylinders`、`collision_force_threshold` | 实际评估实例数、活动圆柱数和碰撞阈值。 |
-| `episodes_per_layout` | 每种布局目标回合数。 |
-| `complete` | 六种布局是否全部完成目标配额。 |
-| `layouts.maze_01` 至 `layouts.maze_06` | 各布局的计数和比例。 |
+| `num_envs`、`collision_force_threshold` | 实际评估实例数和碰撞阈值。 |
+| `scene_manifest` | 地图种子、摘要、目标栅格和场景版本。 |
+| `episodes_per_map` | 每张地图目标回合数。 |
+| `complete` | 所有评估地图是否全部完成目标配额。 |
+| `maps.eval_000` 等 | 各地图的计数和比例。 |
 | `overall` | 已计入回合的整体计数和比例。 |
 
-每个布局及 `overall` 都包含 `episodes`、`success`、`collision`、`timeout` 和对应的 `success_rate`、`collision_rate`、`timeout_rate`。比例取值为 0–1，例如 `0.85` 表示 85%；没有已完成回合时比例为 `null`。
+每张地图及 `overall` 都包含 `episodes`、`success`、`collision`、`timeout` 和对应的 `success_rate`、`collision_rate`、`timeout_rate`。比例取值为 0–1，例如 `0.85` 表示 85%；没有已完成回合时比例为 `null`。
 
 评估结局互斥，按以下优先级判定：
 
@@ -324,7 +328,7 @@ python -m json.tool runs/<运行名>/evaluation/eval_<时间戳>/summary.json
 
 默认目标水平距离阈值为 0.4 m，回合时限为 40 s，实际由 checkpoint 的环境配置决定。场地四周有墙；代码仍保留越界判断，并在评估中归入碰撞。
 
-三项率的分母都是**该范围内已计入的完整回合数**。非空统计的三项率之和为 1，碰撞率就是发生碰撞的回合数除以完整回合数。完整默认评估中，每个布局应为 1000，整体为 6000；提前退出时整体按实际样本数加权，不能把它当作六种布局等量评估结果。
+三项率的分母都是**该范围内已计入的完整回合数**。非空统计的三项率之和为 1，碰撞率就是发生碰撞的回合数除以完整回合数。完整默认评估中，每张地图应为 1000，整体为 16000；提前退出时整体按实际样本数加权，不能把它当作所有评估地图等量评估结果。
 
 ### 查看逐回合记录
 
@@ -334,12 +338,14 @@ python -m json.tool runs/<运行名>/evaluation/eval_<时间戳>/summary.json
 | --- | --- |
 | `maze` | 布局名称。 |
 | `env_id` | 并行仿真实例编号，不是布局编号。 |
-| `episode` | 此布局内已计入回合的序号，从 1 开始。 |
+| `episode` | 该环境的回合编号，从 0 开始。 |
+| `map_hash`、`goal_id`、`start_xy` | 地图内容摘要、目标索引和局部出生坐标，用于复查。 |
+| `episode_start_toa` | 本回合进度奖励的固定分母。 |
 | `outcome` | `success`、`collision` 或 `timeout`。 |
 | `steps` | 本回合的策略步数，不是物理子步数。 |
 | `return` | 本回合累计环境奖励。 |
 
-程序在有回合完成时刷新统计文件，可以在评估运行中查看。正式比较时，先核对 `complete`、checkpoint、障碍物数量和每种布局样本数，再比较比例。
+程序在有回合完成时刷新统计文件，可以在评估运行中查看。正式比较时，先核对 `complete`、checkpoint、地图摘要和每张地图样本数，再比较比例。
 
 ### 查看 debug 视频与轨迹
 
@@ -352,9 +358,9 @@ python scripts/play.py runs/<运行名>/checkpoints/model_best.pt \
 
 打开启动日志打印的 `debug/play_<时间戳>/index.html`，点击某个回合进入回放。网页包含深度视频、请求/执行动作、实际运动状态和俯视轨迹，支持播放、调速、逐帧及拖动定位。
 
-保存规则是**按开始顺序预选每种布局中间 4 个完整回合，共最多 24 个**，不是每个并行实例 4 个。每种布局评估 1000 回合时，选择第 **499–502** 个；同一步开始的回合按环境编号排序。目标数为 N 时，保存数量 K=min(4,N)，起始序号为 floor((N-K)/2)+1，连续选择 K 个。
+保存规则是**按开始顺序预选每张地图中间 4 个完整回合，默认评估池共最多 64 个**，不是每个并行实例 4 个。每张地图评估 1000 回合时，选择第 **499–502** 个；同一步开始的回合按环境编号排序。目标数为 N 时，保存数量 K=min(4,N)，起始序号为 floor((N-K)/2)+1，连续选择 K 个。
 
-选择在回合开始时确定，不根据成功、碰撞或结束快慢筛选；未选中回合不采集回放数据。回放索引和 `telemetry.json` 的 `layout_start_episode` 标明布局内从 1 开始的序号，它与 CSV 中按完成顺序编号的 `episode` 不同。4 个回合仍只是小样本，不保证覆盖三种结局。
+选择在回合开始时确定，不根据成功、碰撞或结束快慢筛选；未选中回合不采集回放数据。回放索引和 `telemetry.json` 的 `map_start_episode` 标明地图内从 1 开始的序号，它与 CSV 中环境内的回合编号 `episode` 不同。4 个回合仍只是小样本，不保证覆盖三种结局。
 
 若统计配额先满而选中的回放尚未结束，程序会继续仿真至这些回放完整结束，额外完成的回合不计入统计。Ctrl+C、关闭窗口或 `--steps` 上限仍会提前停止；中断时未完成的回放不保存。
 
@@ -367,7 +373,7 @@ python scripts/play.py runs/<运行名>/checkpoints/model_best.pt \
 
 灰度视频使用固定深度量程；数值分析应使用 NPZ 原始深度。状态中的 `vx/vy` 为机体系速度（m/s），`w` 为机体系 Z 轴角速度（rad/s）。每帧对应动作执行后的状态，包含自动重置前的终止帧。
 
-在远端运行时，把整个 `play_<时间戳>` 文件夹复制到本地再打开 HTML，保持 HTML 与 MP4 的相对路径。全局 TOA PNG/NPZ 另存于 `debug/`，不占这 24 个 episode 的配额。
+在远端运行时，把整个 `play_<时间戳>` 文件夹复制到本地再打开 HTML，保持 HTML 与 MP4 的相对路径。全局 TOA PNG/NPZ 另存于 `debug/`，不占各地图的 episode 的配额。
 
 ## 7. 修改算法与导出模型
 
@@ -380,7 +386,7 @@ Isaac Sim / PhysX → NavigationEnv → IsaacLabWrapper → PPO
 策略动作 → Lee 控制器 → 无人机物理运动
 ```
 
-默认物理频率为 120 Hz，每 5 个物理步执行一次策略决策，即 24 Hz。Actor 与 Critic 使用独立编码器。修改布局看 `envs/layouts.py`，修改奖励/终止看 `envs/navigation.py`，修改网络看 `models/actor_critic.py`、`models/recurrent.py` 和 `NetworkConfig`；`share_depth_encoder=True` 当前尚未实现。
+默认物理频率为 120 Hz，每 5 个物理步执行一次策略决策，即 24 Hz。Actor 与 Critic 使用独立编码器。修改地图生成看 `envs/maze.py`，修改奖励/终止看 `envs/navigation.py`，修改网络看 `models/actor_critic.py`、`models/recurrent.py` 和 `NetworkConfig`；`share_depth_encoder=True` 当前尚未实现。
 
 Lee 控制器在机体系力矩中加入 `Ω × (JΩ)`，补偿刚体方程的陀螺耦合。接触历史检测及控制器修复会改变旧 checkpoint 的仿真轨迹和结局；与修复前的评估结果比较时，请同时记录代码版本。
 
@@ -402,6 +408,6 @@ python scripts/export_actor.py \
 python -m unittest discover -s tests -v
 ```
 
-这些测试覆盖纯 Python / PyTorch 逻辑和回放编码，不能替代真实仿真验证。安装后可先执行短训练，再用生成的 checkpoint 做每种布局 2 个回合的评估检查。
+这些测试覆盖纯 Python / PyTorch 逻辑和回放编码，不能替代真实仿真验证。安装后可先执行短训练，再用生成的 checkpoint 做每张地图 2 个回合的评估检查。
 
 第三方实现来源及许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

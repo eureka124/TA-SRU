@@ -47,7 +47,7 @@
     <section>
       <h2>俯视图 · x / y 轨迹</h2>
       <canvas id="map" width="640" height="640"></canvas>
-      <p class="muted">灰色：边界与迷宫墙；棕色：本回合圆柱；绿色：起点；红色：目标；蓝线：已飞轨迹；箭头：当前朝向。坐标已扣除并行环境偏移。</p>
+      <p class="muted">灰色：边界与迷宫墙；绿色：起点；红色：目标；蓝线：已飞轨迹；箭头：当前朝向。坐标已扣除当前地图的世界偏移。</p>
     </section>
   </div>
   <section style="margin-top:20px">
@@ -101,7 +101,6 @@
       function circle(xy, radius, color) {
         c.fillStyle = color; c.beginPath(); c.arc(x(xy[0]), y(xy[1]), radius, 0, Math.PI * 2); c.fill();
       }
-      for (const cylinder of data.cylinders) circle(cylinder.xy, cylinder.radius * scale, '#b78254');
       c.strokeStyle = '#38bdf8'; c.lineWidth = 2;
       c.beginPath(); c.moveTo(x(data.start[0]), y(data.start[1]));
       for (let i = 0; i <= current; i++) c.lineTo(x(samples[i].xy[0]), y(samples[i].xy[1]));

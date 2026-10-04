@@ -10,6 +10,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import traceback
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,7 +38,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="循环单元；lstm 表示 torch.nn.LSTM",
     )
-    parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(
         "--network-device", default=None, help="默认与 Isaac 仿真设备相同"
     )
@@ -71,18 +72,35 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="每隔多少次 PPO 更新写入 CSV 和 TensorBoard（默认：1）",
     )
-    parser.add_argument("--toa-grid-size", type=int, default=401)
+    for option in (
+        "maze-seed",
+        "maze-size",
+        "train-map-count",
+        "eval-map-count",
+        "goals-per-map",
+    ):
+        parser.add_argument(f"--{option}", type=int, default=None)
+    for option in (
+        "maze-cell-size",
+        "maze-wall-removal-probability",
+        "toa-resolution",
+        "episode-seconds",
+        "safety-margin",
+        "spawn-margin",
+        "min-start-goal-distance",
+    ):
+        parser.add_argument(f"--{option}", type=float, default=None)
+    parser.add_argument("--toa-cache-dir", default=None)
     parser.add_argument(
         "--toa-normalization-max",
         type=float,
         default=None,
         help="固定 TOA 量程；新训练默认自动计算，恢复时默认沿用 checkpoint",
     )
-    parser.add_argument("--cylinders", type=int, default=60)
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="显示目标、速度和轨迹标记，并保存六种迷宫的全局 TOA 图",
+        help="显示目标、速度和轨迹标记，并保存地图池的各目标 TOA 图",
     )
     AppLauncher.add_app_launcher_args(parser)
     return parser.parse_args()
@@ -137,6 +155,27 @@ def _capture_source_state(
         if diff_path is not None
         else _git_stdout(repository_root, "diff", commit_id)
     )
+    if diff_path is None:
+        # 普通 git diff 不包含新增未跟踪模块；将可见源码一并纳入运行快照。
+        untracked = _git_stdout(
+            repository_root, "ls-files", "--others", "--exclude-standard", "-z"
+        )
+        for name in untracked.decode().split("\0"):
+            if (
+                not name
+                or Path(name).parts[0] not in {"src", "scripts", "tests"}
+                or Path(name).suffix not in {".py", ".sh", ".md"}
+            ):
+                continue
+            added = subprocess.run(
+                ["git", "diff", "--no-index", "--", "/dev/null", name],
+                cwd=repository_root,
+                capture_output=True,
+                check=False,
+            )
+            if added.returncode not in (0, 1):
+                raise RuntimeError(f"无法记录新增源码：{name}")
+            diff_content += added.stdout
     return commit_id, diff_content
 
 
@@ -148,11 +187,17 @@ def _raise_keyboard_interrupt(_signal_number: int, _frame: object) -> None:
 
 def main() -> None:
     args = parse_args()
-    saved = (
-        torch.load(args.resume, map_location="cpu", weights_only=True)["config"]
+    from ta_sru.evaluation import require_dfs_checkpoint
+    from ta_sru.scene_config import training_env_config
+
+    checkpoint = (
+        torch.load(args.resume, map_location="cpu", weights_only=True)
         if args.resume
         else None
     )
+    if checkpoint is not None:
+        require_dfs_checkpoint(checkpoint)
+    saved = checkpoint["config"] if checkpoint else None
     algorithm = args.algorithm or (
         saved.get("algorithm", "recurrent_ppo") if saved else "recurrent_ppo"
     )
@@ -177,7 +222,7 @@ def main() -> None:
 
     # 依赖 omni/PhysX 的模块只能在 AppLauncher 之后导入。
     from ta_sru.algorithms import RecurrentPPO
-    from ta_sru.config import EnvConfig, NetworkConfig, PPOConfig, TrainConfig
+    from ta_sru.config import NetworkConfig, PPOConfig, TrainConfig
     from ta_sru.envs import IsaacLabWrapper, NavigationEnv, make_isaac_env_cfg
 
     env = None
@@ -185,21 +230,30 @@ def main() -> None:
         timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
         run_name = f"{'ppo' if algorithm == 'ppo' else args.recurrent_type}_{args.run_name or timestamp}"
         log_dir = Path(args.log_dir) / run_name
-        task_config = EnvConfig(
+        fields = (
+            "seed",
+            "maze_seed",
+            "maze_size",
+            "train_map_count",
+            "eval_map_count",
+            "goals_per_map",
+            "maze_cell_size",
+            "maze_wall_removal_probability",
+            "toa_resolution",
+            "episode_seconds",
+            "safety_margin",
+            "spawn_margin",
+            "min_start_goal_distance",
+            "toa_cache_dir",
+            "toa_normalization_max",
+        )
+        overrides = {field: getattr(args, field) for field in fields}
+        overrides.update(
             num_envs=args.num_envs,
-            seed=args.seed,
             debug=args.debug,
             debug_output_dir=str(log_dir / "debug") if args.debug else None,
-            toa_grid_size=args.toa_grid_size,
-            toa_normalization_max=(
-                args.toa_normalization_max
-                if args.toa_normalization_max is not None
-                else saved["env"].get("toa_normalization_max", 255.0)
-                if saved
-                else None
-            ),
-            random_cylinder_count=args.cylinders,
         )
+        task_config = training_env_config(saved["env"] if saved else None, overrides)
         checkpoint_dir = (
             log_dir / "checkpoints"
             if args.checkpoint_dir is None
@@ -241,6 +295,12 @@ def main() -> None:
             print(f"调试输出：{task_config.debug_output_dir}")
         isaac_config = make_isaac_env_cfg(task_config, sim_device=args.device)
         env = IsaacLabWrapper(NavigationEnv(isaac_config, task_config))
+        (log_dir / "scene_manifest.json").write_text(
+            json.dumps(env.scene_manifest, indent=2), encoding="utf-8"
+        )
+        (log_dir / "config.json").write_text(
+            json.dumps(asdict(config), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         agent = RecurrentPPO(env, config)
         if args.resume:
             agent.load(args.resume)
@@ -261,6 +321,10 @@ def main() -> None:
             agent.save(checkpoint_dir / "model_final.pt")
         finally:
             signal.signal(signal.SIGINT, previous_sigint_handler)
+    except Exception:
+        # Isaac Sim 的关闭流程可能结束进程，必须提前输出原始异常。
+        traceback.print_exc()
+        raise
     finally:
         if env is not None:
             env.close()

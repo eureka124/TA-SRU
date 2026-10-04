@@ -15,7 +15,6 @@ import imageio_ffmpeg
 import numpy as np
 import torch
 
-from ta_sru.envs.layouts import MAZE_LAYOUTS
 from ta_sru.models.hummingbird import rotate_inverse, yaw_from_quaternion
 
 if TYPE_CHECKING:
@@ -46,26 +45,26 @@ class PlayDebugRecorder:
         output_dir: str | Path,
         dt: float,
         *,
-        max_episodes_per_layout: int | None = None,
-        episodes_per_layout: int | None = None,
+        max_episodes_per_map: int | None = None,
+        episodes_per_map: int | None = None,
     ) -> None:
         if dt <= 0:
             raise ValueError("回放时间步长必须为正数")
-        if max_episodes_per_layout is not None and max_episodes_per_layout <= 0:
-            raise ValueError("每种布局的保存上限必须为正数")
-        self.max_episodes_per_layout = max_episodes_per_layout
-        if episodes_per_layout is not None and (
-            episodes_per_layout <= 0 or max_episodes_per_layout is None
+        if max_episodes_per_map is not None and max_episodes_per_map <= 0:
+            raise ValueError("每张地图的保存上限必须为正数")
+        self.max_episodes_per_map = max_episodes_per_map
+        if episodes_per_map is not None and (
+            episodes_per_map <= 0 or max_episodes_per_map is None
         ):
             raise ValueError("中间回合录制需要正数评估目标及保存上限")
         self.selection_range: tuple[int, int] | None = None
-        if episodes_per_layout is not None:
-            count = min(max_episodes_per_layout, episodes_per_layout)
-            first = (episodes_per_layout - count) // 2 + 1
+        if episodes_per_map is not None:
+            count = min(max_episodes_per_map, episodes_per_map)
+            first = (episodes_per_map - count) // 2 + 1
             self.selection_range = (first, first + count - 1)
-        self.layout_starts: dict[str, int] = {}
+        self.map_starts: dict[str, int] = {}
         self.running_envs: set[int] = set()
-        self.layout_counts: dict[str, int] = {}
+        self.map_counts: dict[str, int] = {}
         self.dt = dt
         self.output_dir = Path(output_dir) / datetime.now(
             timezone.utc
@@ -82,63 +81,46 @@ class PlayDebugRecorder:
     def _scene(env: NavigationEnv, env_id: int) -> dict:
         """使用本回合的实际障碍物姿态，并去掉并行环境的平移量。"""
 
-        origin = _numpy(env.scene.env_origins[env_id, :2])
-        rectangles = []
-        walls = [
-            env.scene[f"boundary_{side}"] for side in ("north", "south", "east", "west")
+        origin = _numpy(env.map_origins[env_id, :2])
+        map_id = int(env.map_ids[env_id].item())
+        maze = env.map_definitions[map_id]
+        rectangles = [
+            {"xy": [x, y], "size": [sx, sy], "yaw": 0.0}
+            for x, y, sx, sy in maze.rectangles()
         ]
-        for wall in [*walls, *env.inner_walls]:
-            position = _numpy(wall.data.root_pos_w[env_id])
-            if position[2] < 0:
-                continue
-            rectangles.append(
-                {
-                    "xy": (position[:2] - origin).tolist(),
-                    "size": list(wall.cfg.spawn.size[:2]),
-                    "yaw": float(
-                        yaw_from_quaternion(
-                            wall.data.root_quat_w[env_id : env_id + 1]
-                        ).item()
-                    ),
-                }
-            )
-        cylinders = []
-        positions = _numpy(env.random_cylinders.data.object_pos_w[env_id])
-        radii = _numpy(env.cylinder_radii)
-        for position, radius in zip(positions, radii):
-            if position[2] >= 0:
-                cylinders.append(
-                    {"xy": (position[:2] - origin).tolist(), "radius": float(radius)}
-                )
         return {
             "env_id": env_id,
-            "maze": MAZE_LAYOUTS[int(env.maze_ids[env_id].item())].name,
+            "maze": env.map_names[int(env.map_ids[env_id].item())],
             "extent": env.task.arena_half_extent,
             "depth_max": env.task.depth_max_distance,
             "goal": (_numpy(env.goal_positions[env_id, :2]) - origin).tolist(),
             "start": (_numpy(env.robot.data.root_pos_w[env_id, :2]) - origin).tolist(),
             "rectangles": rectangles,
-            "cylinders": cylinders,
+            "map_hash": maze.content_hash,
+            "goal_id": int(env.goal_ids[env_id].item()),
+            "episode_start_toa": float(env.episode_start_toa[env_id].item()),
         }
 
     def begin_step(self, env: NavigationEnv, actions: torch.Tensor) -> None:
         self.requested_actions = _numpy(actions)
         for env_id in range(env.num_envs):
-            maze = MAZE_LAYOUTS[int(env.maze_ids[env_id].item())].name
-            layout_episode = None
+            if not bool(env.evaluation_active[env_id]):
+                continue
+            maze = env.map_names[int(env.map_ids[env_id].item())]
+            map_episode = None
             if self.selection_range is not None:
                 # 在回合开始时决定是否录制，避免完成快慢影响入选概率。
                 if env_id in self.running_envs:
                     continue
                 self.running_envs.add(env_id)
-                layout_episode = self.layout_starts.get(maze, 0) + 1
-                self.layout_starts[maze] = layout_episode
+                map_episode = self.map_starts.get(maze, 0) + 1
+                self.map_starts[maze] = map_episode
                 episode_id = self.episode_counts.get(env_id, 0)
                 self.episode_counts[env_id] = episode_id + 1
                 first, last = self.selection_range
-                if not first <= layout_episode <= last:
+                if not first <= map_episode <= last:
                     continue
-            if self._layout_full(maze):
+            if self._map_full(maze):
                 self.episodes.pop(env_id, None)
                 continue
             if env_id not in self.episodes:
@@ -146,8 +128,8 @@ class PlayDebugRecorder:
                     episode_id = self.episode_counts.get(env_id, 0)
                 metadata = self._scene(env, env_id)
                 metadata.update(episode_id=episode_id, dt=self.dt)
-                if layout_episode is not None:
-                    metadata["layout_start_episode"] = layout_episode
+                if map_episode is not None:
+                    metadata["map_start_episode"] = map_episode
                 self.episodes[env_id] = _Episode(metadata)
 
     def capture(self, env: NavigationEnv, done: torch.Tensor) -> None:
@@ -164,9 +146,7 @@ class PlayDebugRecorder:
         velocity = rotate_inverse(quaternion, env.robot.data.root_lin_vel_w)
         angular = rotate_inverse(quaternion, env.robot.data.root_ang_vel_w)
         actual = _numpy(torch.cat((velocity[:, :2], angular[:, 2:3]), dim=-1))
-        position = _numpy(
-            env.robot.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
-        )
+        position = _numpy(env.robot.data.root_pos_w[:, :2] - env.map_origins[:, :2])
         yaw = _numpy(yaw_from_quaternion(quaternion))
         applied = _numpy(env.actions)
         outcomes = {
@@ -174,7 +154,7 @@ class PlayDebugRecorder:
             for key in ("success", "collided", "outside", "time_out")
         }
         for env_id, episode in list(self.episodes.items()):
-            if self._layout_full(episode.metadata["maze"]):
+            if self._map_full(episode.metadata["maze"]):
                 del self.episodes[env_id]
                 continue
             episode.depth.append(depth[env_id].copy())
@@ -189,7 +169,7 @@ class PlayDebugRecorder:
                 }
             )
             if done_host[env_id]:
-                if self.max_episodes_per_layout is not None:
+                if self.max_episodes_per_map is not None:
                     # 回放独立于评估脚本，使用相同的碰撞优先顺序。
                     if outcomes["collided"][env_id] or outcomes["outside"][env_id]:
                         reason = "collision"
@@ -205,10 +185,10 @@ class PlayDebugRecorder:
                     )
                 self._finish(env_id, reason)
 
-    def _layout_full(self, maze: str) -> bool:
+    def _map_full(self, maze: str) -> bool:
         return (
-            self.max_episodes_per_layout is not None
-            and self.layout_counts.get(maze, 0) >= self.max_episodes_per_layout
+            self.max_episodes_per_map is not None
+            and self.map_counts.get(maze, 0) >= self.max_episodes_per_map
         )
 
     def _finish(self, env_id: int, reason: str) -> None:
@@ -291,13 +271,13 @@ class PlayDebugRecorder:
                 "outcome": reason,
                 "frames": len(depth),
                 "maze": metadata["maze"],
-                "layout_start_episode": metadata.get("layout_start_episode"),
+                "map_start_episode": metadata.get("map_start_episode"),
             }
         )
         if self.selection_range is None:
             self.episode_counts[env_id] = metadata["episode_id"] + 1
         maze = metadata["maze"]
-        self.layout_counts[maze] = self.layout_counts.get(maze, 0) + 1
+        self.map_counts[maze] = self.map_counts.get(maze, 0) + 1
         del self.episodes[env_id]
         self._write_index()
         print(f"[DEBUG] 已保存 {name}（{reason}，{len(depth)} 帧）", flush=True)
@@ -306,8 +286,8 @@ class PlayDebugRecorder:
         rows = "\n".join(
             f'<li><a href="{entry["path"]}/index.html">环境 {entry["env_id"]} / 回合 {entry["episode_id"]}</a>'
             + (
-                f" — {entry['maze']} / 开始序号 {entry['layout_start_episode']}"
-                if entry["layout_start_episode"] is not None
+                f" — {entry['maze']} / 开始序号 {entry['map_start_episode']}"
+                if entry["map_start_episode"] is not None
                 else ""
             )
             + f" — {html.escape(entry['outcome'])}，{entry['frames']} 帧</li>"
@@ -326,7 +306,7 @@ class PlayDebugRecorder:
     def close(self) -> None:
         """限额评估只保存完整回合；原有无限额回放仍保存中断回合。"""
 
-        if self.max_episodes_per_layout is not None:
+        if self.max_episodes_per_map is not None:
             self.episodes.clear()
             return
         errors = []

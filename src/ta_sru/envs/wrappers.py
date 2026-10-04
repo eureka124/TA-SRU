@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 class IsaacLabWrapper:
-    def __init__(self, env: "NavigationEnv") -> None:
+    def __init__(self, env: NavigationEnv) -> None:
         self.env = env
         self.num_envs = env.num_envs
         self.sim_device = torch.device(env.device)
@@ -24,7 +24,9 @@ class IsaacLabWrapper:
         self.action_high = np.asarray(env.task.action_high, dtype=np.float32)
 
     @staticmethod
-    def _host_observation(observation: dict[str, torch.Tensor]) -> dict[str, np.ndarray]:
+    def _host_observation(
+        observation: dict[str, torch.Tensor],
+    ) -> dict[str, np.ndarray]:
         return {
             key: value.detach().cpu().numpy().astype(np.float32, copy=False)
             for key, value in observation.items()
@@ -42,16 +44,8 @@ class IsaacLabWrapper:
         self.env.set_training_progress(elapsed_steps)
 
     @property
-    def training_curriculum_stage(self) -> int:
-        return self.env.training_curriculum_stage
-
-    @property
-    def training_curriculum_maze_count(self) -> int:
-        return self.env.training_curriculum_maze_count
-
-    @property
-    def training_curriculum_cylinder_count(self) -> int:
-        return self.env.training_curriculum_cylinder_count
+    def scene_manifest(self) -> dict:
+        return self.env.scene_manifest
 
     @property
     def training_curriculum_contact_scale(self) -> float:
@@ -73,9 +67,13 @@ class IsaacLabWrapper:
         if isinstance(actions, torch.Tensor):
             action_tensor = actions.to(device=self.sim_device, dtype=torch.float32)
         else:
-            bounded = np.clip(np.asarray(actions, dtype=np.float32), self.action_low, self.action_high)
+            bounded = np.clip(
+                np.asarray(actions, dtype=np.float32), self.action_low, self.action_high
+            )
             action_tensor = torch.from_numpy(bounded).to(self.sim_device)
-        observation, reward, terminated, truncated, extras = self.env.step(action_tensor)
+        observation, reward, terminated, truncated, extras = self.env.step(
+            action_tensor
+        )
         host_observation = self._host_observation(observation["policy"])
         terminated_host = terminated.detach().cpu().numpy()
         truncated_host = truncated.detach().cpu().numpy()
@@ -83,16 +81,38 @@ class IsaacLabWrapper:
 
         terminal_batch = extras.get("terminal_observation")
         infos: list[dict[str, Any]] = [{} for _ in range(self.num_envs)]
-        scalar_keys = ("success", "collided", "time_out", "outside", "distance_to_goal")
+        scalar_keys = (
+            "success",
+            "collided",
+            "time_out",
+            "outside",
+            "distance_to_goal",
+            "map_id",
+            "goal_id",
+            "evaluation_active",
+            "episode_start_toa",
+            "episode_id",
+        )
+        # 每个批量字段只传回 CPU 一次，避免按环境逐项触发 GPU 同步。
+        host_extras = {
+            key: extras[key].detach().cpu().numpy()
+            for key in scalar_keys
+            if isinstance(extras.get(key), torch.Tensor)
+        }
         for env_id in range(self.num_envs):
-            for key in scalar_keys:
-                value = extras.get(key)
-                if isinstance(value, torch.Tensor):
-                    infos[env_id][key] = value[env_id].detach().cpu().item()
+            for key, value in host_extras.items():
+                infos[env_id][key] = value[env_id].item()
         for env_id in done_ids:
+            infos[env_id]["start_xy"] = (
+                extras["start_xy"][env_id].detach().cpu().tolist()
+            )
             if isinstance(terminal_batch, dict):
                 infos[env_id]["terminal_observation"] = {
-                    key: value[env_id].detach().cpu().numpy().astype(np.float32, copy=False)
+                    key: value[env_id]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32, copy=False)
                     for key, value in terminal_batch.items()
                 }
             else:

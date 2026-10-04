@@ -1,4 +1,4 @@
-"""Isaac Lab DirectRLEnv：六迷宫 Hummingbird 导航任务。
+"""Isaac Lab DirectRLEnv：DFS 地图池 Hummingbird 导航任务。
 
 本模块必须在 ``AppLauncher`` 启动 Isaac Sim 后导入。
 """
@@ -12,14 +12,7 @@ import isaaclab.sim as sim_utils
 import numpy as np
 import torch
 import torch.nn.functional as F
-from isaaclab.assets import (
-    Articulation,
-    AssetBaseCfg,
-    RigidObject,
-    RigidObjectCfg,
-    RigidObjectCollection,
-    RigidObjectCollectionCfg,
-)
+from isaaclab.assets import Articulation, AssetBaseCfg
 from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
@@ -30,18 +23,19 @@ from isaaclab.sensors import (
     MultiMeshRayCasterCameraCfg,
 )
 from isaaclab.sensors.ray_caster import patterns
-from isaaclab.sim import SimulationCfg
+from isaaclab.sim import SimulationCfg, SimulationContext
 from isaaclab.utils import configclass
 
 from ta_sru.config import EnvConfig
 from ta_sru.envs.contact import peak_contact_force
-from ta_sru.envs.curriculum import select_training_maze_curriculum_stage
-from ta_sru.envs.layouts import MAZE_LAYOUTS
+from ta_sru.envs.maze import pool_mesh, pool_origins
 from ta_sru.envs.toa import (
     build_toa_bank,
     resolve_toa_normalization_max,
     save_toa_global_maps,
 )
+from ta_sru.envs.toa_sampling import normalized_progress, sample_toa
+from ta_sru.evaluation import MapQuotaScheduler
 from ta_sru.models.hummingbird import (
     HummingbirdParameters,
     rotate_inverse,
@@ -50,134 +44,42 @@ from ta_sru.models.hummingbird import (
 from ta_sru.models.hummingbird_asset import HUMMINGBIRD_CFG
 from ta_sru.models.lee_controller import LeePositionController
 
-INNER_WALL_LENGTH_SCALES = (1.0, 1.0, 1.0, 0.5, 0.5)
-MAX_INNER_WALLS = len(INNER_WALL_LENGTH_SCALES)
-MAX_RANDOM_CYLINDERS = 60
-CYLINDER_VARIANTS = ((0.30, 2.5), (0.45, 3.2), (0.60, 4.0))
 TRAJECTORY_MAX_POINTS = 512
 TRAJECTORY_POINT_SPACING = 0.15
 
 
-def _camera_mesh_targets(
-    cylinder_count: int,
-) -> list[MultiMeshRayCasterCameraCfg.RaycastTargetCfg]:
-    """逐槽位配置相机网格，使克隆环境能够命中共享网格缓存。"""
+def _spawn_dfs_mesh(prim_path, cfg, translation=None, orientation=None):
+    """在场景解析期间创建全局网格，让首次碰撞过滤包含地图。"""
+    from pxr import UsdGeom, UsdPhysics
 
-    # 同一表达式匹配多个同形障碍物时，Isaac Lab 的去重分支可能不缓存别名，
-    # 导致后续环境重复解析网格；只对环境编号使用通配符。
-    names = (
-        "Floor",
-        "BoundaryNorth",
-        "BoundarySouth",
-        "BoundaryEast",
-        "BoundaryWest",
-        *(f"InnerWall_{index}" for index in range(MAX_INNER_WALLS)),
-        *(f"RandomCylinder_{index:02d}" for index in range(cylinder_count)),
-    )
-    return [
-        MultiMeshRayCasterCameraCfg.RaycastTargetCfg(
-            prim_expr=f"{{ENV_REGEX_NS}}/{name}",
-            is_shared=True,
-            track_mesh_transforms=True,
-        )
-        for name in names
-    ]
+    stage = SimulationContext.instance().stage
+    mesh = UsdGeom.Mesh.Define(stage, prim_path)
+    mesh.CreatePointsAttr(cfg.vertices.tolist())
+    mesh.CreateFaceVertexCountsAttr([3] * len(cfg.faces))
+    mesh.CreateFaceVertexIndicesAttr(cfg.faces.reshape(-1).tolist())
+    mesh.CreateSubdivisionSchemeAttr("none")
+    UsdPhysics.CollisionAPI.Apply(mesh.GetPrim())
+    UsdPhysics.MeshCollisionAPI.Apply(mesh.GetPrim()).CreateApproximationAttr("none")
+    return mesh.GetPrim()
 
 
-def _fixed_cuboid(size: tuple[float, float, float]) -> sim_utils.CuboidCfg:
-    return sim_utils.CuboidCfg(
-        size=size,
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            kinematic_enabled=True, disable_gravity=True
-        ),
-        collision_props=sim_utils.CollisionPropertiesCfg(),
-    )
-
-
-def _fixed_cylinder(radius: float, height: float) -> sim_utils.CylinderCfg:
-    return sim_utils.CylinderCfg(
-        radius=radius,
-        height=height,
-        axis="Z",
-        rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            kinematic_enabled=True, disable_gravity=True
-        ),
-        collision_props=sim_utils.CollisionPropertiesCfg(),
-        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.32, 0.43, 0.55)),
-    )
+@configclass
+class DfsMeshCfg(sim_utils.SpawnerCfg):
+    func = _spawn_dfs_mesh
+    vertices: np.ndarray | None = None
+    faces: np.ndarray | None = None
 
 
 @configclass
 class NavigationSceneCfg(InteractiveSceneCfg):
-    """每个克隆环境包含一架飞机、一组迷宫墙和随机圆柱。"""
+    """各环境只克隆机器人和传感器，静态地图池全局共享。"""
 
     robot = HUMMINGBIRD_CFG
-    floor = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Floor",
-        spawn=_fixed_cuboid((40.0, 40.0, 0.1)),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -0.05)),
-    )
-    boundary_north = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/BoundaryNorth",
-        spawn=_fixed_cuboid((40.0, 0.7, 4.0)),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 20.0, 2.0)),
-    )
-    boundary_south = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/BoundarySouth",
-        spawn=_fixed_cuboid((40.0, 0.7, 4.0)),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, -20.0, 2.0)),
-    )
-    boundary_east = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/BoundaryEast",
-        spawn=_fixed_cuboid((0.7, 40.0, 4.0)),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(20.0, 0.0, 2.0)),
-    )
-    boundary_west = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/BoundaryWest",
-        spawn=_fixed_cuboid((0.7, 40.0, 4.0)),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(-20.0, 0.0, 2.0)),
-    )
-    inner_wall_0 = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/InnerWall_0",
-        spawn=_fixed_cuboid((12.0, 0.7, 4.0)),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -10.0)),
-    )
-    inner_wall_1 = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/InnerWall_1",
-        spawn=_fixed_cuboid((12.0, 0.7, 4.0)),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -10.0)),
-    )
-    inner_wall_2 = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/InnerWall_2",
-        spawn=_fixed_cuboid((12.0, 0.7, 4.0)),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -10.0)),
-    )
-    inner_wall_3 = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/InnerWall_3",
-        spawn=_fixed_cuboid((6.0, 0.7, 4.0)),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -10.0)),
-    )
-    inner_wall_4 = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/InnerWall_4",
-        spawn=_fixed_cuboid((6.0, 0.7, 4.0)),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -10.0)),
-    )
-    random_cylinders = RigidObjectCollectionCfg(
-        rigid_objects={
-            f"cylinder_{index:02d}": RigidObjectCfg(
-                prim_path=f"{{ENV_REGEX_NS}}/RandomCylinder_{index:02d}",
-                spawn=_fixed_cylinder(
-                    *CYLINDER_VARIANTS[index % len(CYLINDER_VARIANTS)]
-                ),
-                init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, -10.0)),
-            )
-            for index in range(MAX_RANDOM_CYLINDERS)
-        }
-    )
+    dfs_maps: AssetBaseCfg | None = None
     camera = MultiMeshRayCasterCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base_link",
         update_period=0.04,
-        mesh_prim_paths=_camera_mesh_targets(MAX_RANDOM_CYLINDERS),
+        mesh_prim_paths=["/World/DfsMaps"],
         data_types=["distance_to_image_plane"],
         max_distance=12.0,
         depth_clipping_behavior="max",
@@ -229,17 +131,14 @@ class IsaacNavigationEnvCfg(DirectRLEnvCfg):
         num_envs=4,
         env_spacing=52.0,
         replicate_physics=True,
-        filter_collisions=True,
+        filter_collisions=False,
     )
 
 
 def make_isaac_env_cfg(task: EnvConfig, sim_device: str) -> IsaacNavigationEnvCfg:
     """把与训练框架无关的配置转换成 Isaac Lab 配置。"""
 
-    if task.random_cylinder_count > MAX_RANDOM_CYLINDERS:
-        raise ValueError(f"随机圆柱最多 {MAX_RANDOM_CYLINDERS} 个")
-    if task.random_cylinder_count <= 0:
-        raise ValueError("Isaac 环境至少需要一个随机圆柱；可将其数量设为 1")
+    task.validate()
     cfg = IsaacNavigationEnvCfg()
     cfg.seed = task.seed
     cfg.decimation = task.control_decimation
@@ -268,20 +167,8 @@ def make_isaac_env_cfg(task: EnvConfig, sim_device: str) -> IsaacNavigationEnvCf
     }
     cfg.scene.camera.pattern_cfg.height = task.depth_height * 4
     cfg.scene.camera.pattern_cfg.width = task.depth_width * 4
-    for wall_id, length_scale in enumerate(INNER_WALL_LENGTH_SCALES):
-        wall_cfg = getattr(cfg.scene, f"inner_wall_{wall_id}")
-        wall_cfg.spawn.size = (
-            task.inner_wall_length * length_scale,
-            task.wall_thickness,
-            task.arena_height,
-        )
-    cfg.scene.random_cylinders.rigid_objects = dict(
-        list(cfg.scene.random_cylinders.rigid_objects.items())[
-            : task.random_cylinder_count
-        ]
-    )
-    # 相机目标与实际生成的圆柱保持一致，避免减少数量后匹配到不存在的路径。
-    cfg.scene.camera.mesh_prim_paths = _camera_mesh_targets(task.random_cylinder_count)
+    cfg.scene.camera.update_period = task.policy_dt
+    cfg.scene.camera.max_distance = task.depth_max_distance
     return cfg
 
 
@@ -297,6 +184,29 @@ class NavigationEnv(DirectRLEnv):
         render_mode: str | None = None,
     ) -> None:
         self.task = task_config
+        self.toa_bank = build_toa_bank(self.task)
+        self.map_definitions = self.toa_bank.maps
+        self.map_names = [maze.name for maze in self.map_definitions]
+        self._pool_origins = pool_origins(
+            len(self.map_names),
+            self.task.arena_half_extent,
+            2 * self.task.depth_max_distance + 2,
+        )
+        vertices, faces = pool_mesh(self.map_definitions, self._pool_origins)
+        cfg.scene.dfs_maps = AssetBaseCfg(
+            prim_path="/World/DfsMaps",
+            collision_group=-1,
+            spawn=DfsMeshCfg(vertices=vertices, faces=faces),
+        )
+        self.scene_manifest = self.toa_bank.manifest
+        self.quota_scheduler = (
+            MapQuotaScheduler(
+                len(self.map_names), self.task.evaluation_episodes_per_map
+            )
+            if self.task.evaluation_episodes_per_map
+            else None
+        )
+        self.episode_counts = np.full(self.task.num_envs, -1, dtype=np.int64)
         # 仅由评估入口安装记录器，训练时不采集视频或回放数据。
         self.play_debug_recorder = None
         super().__init__(cfg, render_mode=render_mode)
@@ -312,28 +222,21 @@ class NavigationEnv(DirectRLEnv):
         self.goal_positions = torch.zeros((self.num_envs, 3), device=self.device)
         self.position_setpoints = torch.zeros_like(self.goal_positions)
         self.yaw_setpoints = torch.zeros((self.num_envs, 1), device=self.device)
-        self.maze_ids = torch.arange(self.num_envs, device=self.device) % len(
-            MAZE_LAYOUTS
-        )
-        self.route_ids = torch.zeros(
-            self.num_envs, dtype=torch.long, device=self.device
-        )
-        self.direction_reversed = torch.zeros(
+        self.map_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.goal_ids = torch.zeros_like(self.map_ids)
+        self.toa_map_ids = torch.zeros_like(self.map_ids)
+        self.map_origins = torch.zeros((self.num_envs, 3), device=self.device)
+        self.start_positions = torch.zeros((self.num_envs, 2), device=self.device)
+        self.evaluation_active = torch.ones(
             self.num_envs, dtype=torch.bool, device=self.device
         )
-        self.toa_map_ids = torch.zeros(
-            self.num_envs, dtype=torch.long, device=self.device
-        )
+        self.episode_start_toa = torch.ones(self.num_envs, device=self.device)
         self.previous_toa = torch.full((self.num_envs,), torch.nan, device=self.device)
         self.training_step_offset = 0
-        self.training_curriculum_stage = 0
-        self.training_curriculum_maze_count = 1
-        self.training_curriculum_cylinder_count = 0
         self.training_curriculum_contact_scale = 0.0
         self.training_curriculum_contact_force_threshold = (
             self.task.collision_force_threshold
         )
-        self._create_layout_tensors()
         self._create_toa_tensors()
         if self.task.debug:
             self._trajectory_history = torch.zeros(
@@ -348,67 +251,21 @@ class NavigationEnv(DirectRLEnv):
         self.robot: Articulation = self.scene["robot"]
         self.camera: MultiMeshRayCasterCamera = self.scene["camera"]
         self.contact_sensor: ContactSensor = self.scene["contact_forces"]
-        self.inner_walls: list[RigidObject] = [
-            self.scene[f"inner_wall_{index}"] for index in range(MAX_INNER_WALLS)
-        ]
-        self.random_cylinders: RigidObjectCollection = self.scene["random_cylinders"]
-
-    def _create_layout_tensors(self) -> None:
-        layout_count = len(MAZE_LAYOUTS)
-        self.wall_xy = torch.zeros(
-            (layout_count, MAX_INNER_WALLS, 2), device=self.device
-        )
-        self.wall_yaw = torch.zeros((layout_count, MAX_INNER_WALLS), device=self.device)
-        self.wall_length = torch.tensor(
-            INNER_WALL_LENGTH_SCALES, device=self.device
-        ).repeat(layout_count, 1)
-        self.wall_length *= self.task.inner_wall_length
-        self.wall_active = torch.zeros(
-            (layout_count, MAX_INNER_WALLS), dtype=torch.bool, device=self.device
-        )
-        self.route_starts = torch.zeros((layout_count, 2, 2), device=self.device)
-        self.route_goals = torch.zeros_like(self.route_starts)
-        for layout_id, layout in enumerate(MAZE_LAYOUTS):
-            next_slot = {1.0: 0, 0.5: 3}
-            for wall in layout.walls:
-                if wall.length_scale not in next_slot:
-                    raise ValueError(f"不支持的墙体长度比例：{wall.length_scale}")
-                wall_id = next_slot[wall.length_scale]
-                next_slot[wall.length_scale] += 1
-                self.wall_xy[layout_id, wall_id] = torch.tensor(
-                    wall.center_xy, device=self.device
-                )
-                self.wall_yaw[layout_id, wall_id] = np.pi / 2 if wall.vertical else 0.0
-                self.wall_active[layout_id, wall_id] = True
-            for route_id, (start, goal) in enumerate(layout.routes):
-                self.route_starts[layout_id, route_id] = torch.tensor(
-                    start, device=self.device
-                )
-                self.route_goals[layout_id, route_id] = torch.tensor(
-                    goal, device=self.device
-                )
-
-        specs = [
-            CYLINDER_VARIANTS[index % len(CYLINDER_VARIANTS)]
-            for index in range(self.task.random_cylinder_count)
-        ]
-        self.cylinder_radii = torch.tensor(
-            [radius for radius, _ in specs], device=self.device
-        )
-        self.cylinder_heights = torch.tensor(
-            [height for _, height in specs], device=self.device
-        )
+        # 显式设置各机器人碰撞组和全局地图；CPU 的首次过滤也包含该路径。
+        self.scene.filter_collisions(global_prim_paths=["/World/DfsMaps"])
 
     def _create_toa_tensors(self) -> None:
-        toa_bank = build_toa_bank(self.task)
         self.toa_normalization_max = resolve_toa_normalization_max(
-            toa_bank, self.task.toa_normalization_max
+            self.toa_bank.values, self.task.toa_normalization_max
         )
-        self.toa_maps = torch.from_numpy(toa_bank).to(self.device)
+        self.task.toa_normalization_max = self.toa_normalization_max
+        self.toa_maps = torch.from_numpy(self.toa_bank.values).to(self.device)
+        self.pool_origins = torch.from_numpy(self._pool_origins).to(self.device)
+        self.target_positions = torch.from_numpy(self.toa_bank.goals).to(self.device)
         if self.task.debug:
             output_dir = self.task.debug_output_dir or "debug"
-            saved = save_toa_global_maps(self.task, toa_bank, output_dir)
-            print(f"[DEBUG] 已保存 {len(saved)} 种迷宫的全局 TOA 图：{output_dir}")
+            saved = save_toa_global_maps(self.task, self.toa_bank, output_dir)
+            print(f"[DEBUG] 已保存 {len(saved)} 张目标 TOA 图：{output_dir}")
         half_extent = self.task.toa_crop_size * self.task.toa_crop_spacing / 2
         coordinates = torch.linspace(
             -half_extent + self.task.toa_crop_spacing / 2,
@@ -592,31 +449,13 @@ class NavigationEnv(DirectRLEnv):
         return depth / self.task.depth_max_distance * 2.0 - 1.0
 
     def _sample_toa(self, points_xy: torch.Tensor) -> torch.Tensor:
-        grid_size = self.toa_maps.shape[-1]
-        spacing = 2.0 * self.task.arena_half_extent / (grid_size - 1)
-        x = ((points_xy[..., 0] + self.task.arena_half_extent) / spacing).clamp(
-            0, grid_size - 1
+        values, _ = sample_toa(
+            self.toa_maps, self.toa_map_ids, points_xy, self.task.arena_half_extent
         )
-        y = ((points_xy[..., 1] + self.task.arena_half_extent) / spacing).clamp(
-            0, grid_size - 1
-        )
-        x0, y0 = torch.floor(x).long(), torch.floor(y).long()
-        x1, y1 = (x0 + 1).clamp(max=grid_size - 1), (y0 + 1).clamp(max=grid_size - 1)
-        wx, wy = x - x0, y - y0
-        offsets = self.toa_map_ids[:, None] * (grid_size * grid_size)
-        flat = self.toa_maps.reshape(-1)
-
-        def gather(row: torch.Tensor, column: torch.Tensor) -> torch.Tensor:
-            return flat[offsets + row * grid_size + column]
-
-        value_0 = gather(y0, x0) * (1 - wx) + gather(y0, x1) * wx
-        value_1 = gather(y1, x0) * (1 - wx) + gather(y1, x1) * wx
-        return value_0 * (1 - wy) + value_1 * wy
+        return values
 
     def _critic_toa_observation(self) -> torch.Tensor:
-        local_position = (
-            self.robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
-        )
+        local_position = self.robot.data.root_pos_w[:, :2] - self.map_origins[:, :2]
         yaw = yaw_from_quaternion(self.robot.data.root_quat_w)
         body_x = self.toa_crop_body[:, 0].unsqueeze(0)
         body_y = self.toa_crop_body[:, 1].unsqueeze(0)
@@ -713,8 +552,8 @@ class NavigationEnv(DirectRLEnv):
         success = distance <= self.task.goal_threshold
         _, contact_force_threshold = self._contact_curriculum()
         collided = self._contact_force() >= contact_force_threshold
-        local_xy = self.robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
-        outside = torch.any(torch.abs(local_xy) > 19.5, dim=-1)
+        local_xy = self.robot.data.root_pos_w[:, :2] - self.map_origins[:, :2]
+        outside = torch.any(torch.abs(local_xy) > self.task.arena_half_extent, dim=-1)
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         terminated = success | collided | outside
 
@@ -724,6 +563,14 @@ class NavigationEnv(DirectRLEnv):
             "time_out": time_out.clone(),
             "outside": outside.clone(),
             "distance_to_goal": distance.clone(),
+            "map_id": self.map_ids.clone(),
+            "goal_id": self.goal_ids.clone(),
+            "evaluation_active": self.evaluation_active.clone(),
+            "episode_start_toa": self.episode_start_toa.clone(),
+            "start_xy": self.start_positions.clone(),
+            "episode_id": torch.as_tensor(
+                self.episode_counts.copy(), device=self.device
+            ),
         }
         if torch.any(terminated | time_out):
             terminal = self._get_observations()["policy"]
@@ -738,7 +585,7 @@ class NavigationEnv(DirectRLEnv):
         return terminated, time_out
 
     def _get_rewards(self) -> torch.Tensor:
-        """计算与 manager-based training_mazes 等价的逐策略步奖励。"""
+        """计算按起点 TOA 归一化的逐策略步奖励。"""
 
         goal_delta = self.goal_positions[:, :2] - self.robot.data.root_pos_w[:, :2]
         goal_direction = goal_delta / (
@@ -751,16 +598,12 @@ class NavigationEnv(DirectRLEnv):
             self.actions - self.previous_actions, dim=-1
         )
 
-        local_position = (
-            self.robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
-        )
+        local_position = self.robot.data.root_pos_w[:, :2] - self.map_origins[:, :2]
         current_toa = self._sample_toa(local_position.unsqueeze(1)).squeeze(1)
-        valid = torch.isfinite(self.previous_toa) & torch.isfinite(current_toa)
-        toa_progress = torch.where(
-            valid, self.previous_toa - current_toa, torch.zeros_like(current_toa)
-        ).clamp(-0.25, 0.25)
-        # 缓存只属于当前回合；_reset_idx 会将重置环境对应的值恢复为 NaN，
-        # 从而保证新回合第一次奖励不会与上一个回合做 TOA 差分。
+        toa_progress = normalized_progress(
+            self.previous_toa, current_toa, self.episode_start_toa
+        )
+        # 起点为本回合固定分母；无效采样切断差分历史，成功时不补发剩余进度。
         self.previous_toa.copy_(current_toa.detach())
 
         curriculum, contact_force_threshold = self._contact_curriculum()
@@ -783,75 +626,6 @@ class NavigationEnv(DirectRLEnv):
         quaternion[:, 3] = torch.sin(yaw / 2)
         return quaternion
 
-    def _sample_cylinder_positions(
-        self,
-        env_ids: torch.Tensor,
-        start_xy: torch.Tensor,
-        goal_xy: torch.Tensor,
-        selected_wall_xy: torch.Tensor,
-        selected_wall_yaw: torch.Tensor,
-        selected_wall_length: torch.Tensor,
-        selected_wall_active: torch.Tensor,
-        cylinder_count: int,
-    ) -> torch.Tensor:
-        if not 0 <= cylinder_count <= self.task.random_cylinder_count:
-            raise ValueError(
-                f"cylinder_count 必须位于 [0, {self.task.random_cylinder_count}]，"
-                f"实际为 {cylinder_count}"
-            )
-        positions = torch.empty((len(env_ids), cylinder_count, 2), device=self.device)
-        vertical = torch.isclose(
-            selected_wall_yaw.abs(),
-            torch.full_like(selected_wall_yaw, torch.pi / 2),
-            atol=1.0e-6,
-            rtol=0.0,
-        )
-        half_x = torch.where(
-            vertical, self.task.wall_thickness / 2, selected_wall_length / 2
-        )
-        half_y = torch.where(
-            vertical, selected_wall_length / 2, self.task.wall_thickness / 2
-        )
-        for cylinder_id in range(cylinder_count):
-            radius = self.cylinder_radii[cylinder_id]
-            limit = (
-                self.task.arena_half_extent
-                - self.task.wall_thickness / 2
-                - radius
-                - 0.35
-            )
-            unresolved = torch.ones(len(env_ids), dtype=torch.bool, device=self.device)
-            for _ in range(128):
-                if not torch.any(unresolved):
-                    break
-                candidate = (
-                    torch.rand((len(env_ids), 2), device=self.device) * 2 - 1
-                ) * limit
-                delta = (candidate[:, None] - selected_wall_xy).abs()
-                dx = torch.clamp(delta[..., 0] - half_x, min=0.0)
-                dy = torch.clamp(delta[..., 1] - half_y, min=0.0)
-                valid = torch.all(
-                    (~selected_wall_active)
-                    | (dx.square() + dy.square() >= (radius + 0.35).square()),
-                    dim=1,
-                )
-                clearance = (radius + 1.0).square()
-                valid &= torch.sum((candidate - start_xy).square(), dim=-1) >= clearance
-                valid &= torch.sum((candidate - goal_xy).square(), dim=-1) >= clearance
-                if cylinder_id:
-                    distance = torch.sum(
-                        (candidate[:, None] - positions[:, :cylinder_id]).square(),
-                        dim=-1,
-                    )
-                    minimum = radius + self.cylinder_radii[:cylinder_id] + 0.35
-                    valid &= torch.all(distance >= minimum.square(), dim=1)
-                accepted = unresolved & valid
-                positions[accepted, cylinder_id] = candidate[accepted]
-                unresolved &= ~accepted
-            if torch.any(unresolved):
-                raise RuntimeError(f"无法放置第 {cylinder_id} 个随机圆柱")
-        return positions
-
     def _reset_idx(self, env_ids: Sequence[int]) -> None:
         env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
         super()._reset_idx(env_ids)
@@ -860,43 +634,40 @@ class NavigationEnv(DirectRLEnv):
         self.previous_actions[env_ids] = 0.0
         if self.task.debug:
             self._trajectory_counts[env_ids] = 0
-        count = len(env_ids)
-        curriculum_stage = select_training_maze_curriculum_stage(
-            elapsed_steps=self.training_elapsed_steps,
-            max_steps=self.task.total_training_steps,
-            stage_fractions=self.task.training_curriculum_stage_fractions,
-            maze_counts=self.task.training_curriculum_maze_counts,
-            cylinder_counts=self.task.training_curriculum_cylinder_counts,
-            maze_start_indices=self.task.training_curriculum_maze_start_indices,
+        if len(env_ids) == 0:
+            return
+        samples, active = [], []
+        for env_id in env_ids.cpu().tolist():
+            self.episode_counts[env_id] += 1
+            selected = self.quota_scheduler.assign() if self.quota_scheduler else None
+            active.append(selected != -1)
+            samples.append(
+                self.toa_bank.sample(
+                    self.task,
+                    env_id,
+                    int(self.episode_counts[env_id]),
+                    0 if selected == -1 else selected,
+                )
+            )
+        map_ids = torch.tensor([item[0] for item in samples], device=self.device)
+        goal_ids = torch.tensor([item[1] for item in samples], device=self.device)
+        start_xy = torch.as_tensor(
+            np.stack([item[2] for item in samples]), device=self.device
         )
-        # --cylinders 可以减少实际创建的槽位，课程数量相应封顶。
-        active_cylinder_count = min(
-            curriculum_stage.cylinder_count, self.task.random_cylinder_count
-        )
-        self.training_curriculum_stage = curriculum_stage.index
-        self.training_curriculum_maze_count = curriculum_stage.maze_count
-        self.training_curriculum_cylinder_count = active_cylinder_count
-        maze_ids = (
-            torch.remainder(env_ids, curriculum_stage.maze_count)
-            + curriculum_stage.maze_start_index
-        )
-        route_ids = torch.randint(0, 2, (count,), device=self.device)
-        reversed_direction = torch.rand(count, device=self.device) < 0.5
-        starts = self.route_starts[maze_ids, route_ids]
-        goals = self.route_goals[maze_ids, route_ids]
-        start_xy = torch.where(reversed_direction[:, None], goals, starts)
-        goal_xy = torch.where(reversed_direction[:, None], starts, goals)
-        origins = self.scene.env_origins[env_ids]
-
-        self.maze_ids[env_ids] = maze_ids
-        self.route_ids[env_ids] = route_ids
-        self.direction_reversed[env_ids] = reversed_direction
-        self.toa_map_ids[env_ids] = (
-            maze_ids * 4 + route_ids * 2 + reversed_direction.long()
-        )
+        initial_toa = torch.tensor([item[3] for item in samples], device=self.device)
+        bank_ids = map_ids * self.task.goals_per_map + goal_ids
+        goal_xy = self.target_positions[bank_ids]
+        origins = self.pool_origins[map_ids]
+        self.map_ids[env_ids] = map_ids
+        self.goal_ids[env_ids] = goal_ids
+        self.toa_map_ids[env_ids] = bank_ids
+        self.map_origins[env_ids] = origins
+        self.start_positions[env_ids] = start_xy
+        self.evaluation_active[env_ids] = torch.tensor(active, device=self.device)
         self.goal_positions[env_ids, :2] = origins[:, :2] + goal_xy
         self.goal_positions[env_ids, 2] = 2.0
-        self.previous_toa[env_ids] = torch.nan
+        self.episode_start_toa[env_ids] = initial_toa
+        self.previous_toa[env_ids] = initial_toa
 
         root_state = self.robot.data.default_root_state[env_ids].clone()
         root_state[:, :3] += origins
@@ -916,50 +687,8 @@ class NavigationEnv(DirectRLEnv):
         self.position_setpoints[env_ids] = root_state[:, :3]
         self.yaw_setpoints[env_ids, 0] = yaw
 
-        selected_xy = self.wall_xy[maze_ids]
-        selected_yaw = self.wall_yaw[maze_ids]
-        selected_length = self.wall_length[maze_ids]
-        selected_active = self.wall_active[maze_ids]
-        for wall_id, wall in enumerate(self.inner_walls):
-            pose = wall.data.default_root_state[env_ids, :7].clone()
-            pose[:, :2] = origins[:, :2] + selected_xy[:, wall_id]
-            pose[:, 2] = torch.where(selected_active[:, wall_id], 2.0, -10.0)
-            pose[:, 3:7] = self._yaw_quaternion(selected_yaw[:, wall_id])
-            wall.write_root_pose_to_sim(pose, env_ids)
-            wall.write_root_velocity_to_sim(
-                torch.zeros((count, 6), device=self.device), env_ids
-            )
-
-        cylinder_xy = self._sample_cylinder_positions(
-            env_ids,
-            start_xy,
-            goal_xy,
-            selected_xy,
-            selected_yaw,
-            selected_length,
-            selected_active,
-            active_cylinder_count,
-        )
-        cylinder_pose = self.random_cylinders.data.default_object_state[
-            env_ids, :, :7
-        ].clone()
-        # 未启用的固定槽位停放到地面以下，避免动态改变场景拓扑。
-        cylinder_pose[:, :, :2] = origins[:, None, :2]
-        cylinder_pose[:, :, 2] = -10.0
-        if active_cylinder_count > 0:
-            cylinder_pose[:, :active_cylinder_count, :2] = (
-                origins[:, None, :2] + cylinder_xy
-            )
-            cylinder_pose[:, :active_cylinder_count, 2] = (
-                self.cylinder_heights[:active_cylinder_count][None] / 2
-            )
-        self.random_cylinders.write_object_pose_to_sim(cylinder_pose, env_ids=env_ids)
-        self.random_cylinders.write_object_velocity_to_sim(
-            torch.zeros(
-                (count, self.task.random_cylinder_count, 6), device=self.device
-            ),
-            env_ids=env_ids,
-        )
+        # 在机器人传送后使下一次读取重新生成相机数据。
+        self.camera.reset(env_ids)
 
 
 __all__ = ["IsaacNavigationEnvCfg", "NavigationEnv", "make_isaac_env_cfg"]

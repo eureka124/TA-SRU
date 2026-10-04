@@ -7,6 +7,7 @@ Hydra 等配置框架，因为 demo 的配置规模不值得增加额外抽象�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import ceil, isfinite
 
 RECURRENT_TYPES = ("sru-lstm", "sru-gru", "sru-lstm-gate", "lstm", "none")
 
@@ -34,28 +35,23 @@ class EnvConfig:
     # 单个回合允许持续的仿真时长，单位为秒。
     episode_seconds: float = 40.0
 
-    # 正方形场地从中心到边界的距离，单位为米。
-    arena_half_extent: float = 20.0
-    # 墙体的高度，单位为米。
+    # 地图、目标和回合采样使用独立随机流。
+    maze_seed: int = 123
+    train_map_count: int = 64
+    eval_map_count: int = 16
+    goals_per_map: int = 8
+    maze_size: int = 15
+    maze_cell_size: float = 2.0
+    maze_wall_removal_probability: float = 0.25
     arena_height: float = 4.0
-    # 边界墙和内部墙的厚度，单位为米。
-    wall_thickness: float = 0.7
-    # 完整内部墙的基准长度，短墙按布局中的比例缩放，单位为米。
-    inner_wall_length: float = 12.0
-    # 为每个环境预生成的随机圆柱槽位数量。
-    random_cylinder_count: int = 60
-    # 构建 TOA 障碍膨胀区域时采用的无人机半径，单位为米。
     drone_radius: float = 0.4
-
-    # 先进行混合迷宫训练，再集中训练第四种 U 形墙壁布局，最后恢复六种混合迷宫。
-    # 各课程阶段相对于总训练步数的起始比例。
-    training_curriculum_stage_fractions: tuple[float, ...] = (0.0, 0.10)
-    # 各课程阶段启用的迷宫布局数量。
-    training_curriculum_maze_counts: tuple[int, ...] = (6, 6)
-    # 各阶段连续启用的迷宫起始索引，从 0 开始；索引 3 对应第四种 U 形布局。
-    training_curriculum_maze_start_indices: tuple[int, ...] = (0, 0)
-    # 各课程阶段启用的随机圆柱数量。
-    training_curriculum_cylinder_counts: tuple[int, ...] = (60, 60)
+    safety_margin: float = 0.1
+    spawn_margin: float = 0.1
+    min_start_goal_distance: float = 4.0
+    # 评估只切换地图池，沿用训练的 Critic 归一化尺度。
+    map_split: str = "train"
+    evaluation_episodes_per_map: int = 0
+    toa_cache_dir: str | None = ".cache/dfs_toa"
 
     # 输入网络的下采样深度图高度，单位为像素。
     depth_height: int = 12
@@ -66,8 +62,8 @@ class EnvConfig:
     # 深度相机的水平视场角，单位为弧度。
     camera_horizontal_fov: float = 1.5707963267948966
 
-    # 覆盖整个场地的全局 TOA 方形网格边长。
-    toa_grid_size: int = 401
+    # 期望 TOA 栅格间距，实际间距由地图范围推导。
+    toa_resolution: float = 0.1
     # Critic 使用的局部 TOA 方形裁剪边长。
     toa_crop_size: int = 16
     # 局部 TOA 裁剪中相邻采样点的间距，单位为米。
@@ -76,7 +72,7 @@ class EnvConfig:
     toa_safe_distance: float = 2.0
     # TOA 速度场贴近障碍物时采用的最低速度比例。
     toa_slow_speed: float = 0.2
-    # None 使用全体静态地图的可通行最大值；数值配置兼容旧模型的固定量程。
+    # None 使用全体静态地图的可通行最大值；评估与恢复沿用训练量程。
     toa_normalization_max: float | None = None
 
     # 动作三个分量的下界，依次为前向速度、侧向速度和偏航角速度。
@@ -84,11 +80,11 @@ class EnvConfig:
     # 动作三个分量的上界，依次为前向速度、侧向速度和偏航角速度。
     action_high: tuple[float, float, float] = (2.0, 0.5, 1.0471975511965976)
 
-    # 与 manager_based/training_mazes 的逐策略步奖励系数保持一致。
+    # 奖励系数按每个策略步计算。
     # DirectRLEnv 不会像 RewardManager 一样再乘 policy_dt，因此这里直接保存最终系数。
     # 朝目标方向速度奖励的权重。
     goal_velocity_weight: float = 0.0
-    # 相邻策略步 TOA 减少量奖励的权重。
+    # 按本回合起点 TOA 归一化后的进度奖励权重。
     toa_progress_weight: float = 50.0
     # 相邻策略步动作变化量惩罚的权重。
     action_smoothness_weight: float = -0.1
@@ -108,6 +104,18 @@ class EnvConfig:
     total_training_steps: int = 70_000_000
 
     @property
+    def arena_half_extent(self) -> float:
+        return self.maze_size * self.maze_cell_size / 2
+
+    @property
+    def toa_grid_size(self) -> int:
+        return ceil(2 * self.arena_half_extent / self.toa_resolution) + 1
+
+    @property
+    def toa_spacing(self) -> float:
+        return 2 * self.arena_half_extent / (self.toa_grid_size - 1)
+
+    @property
     def policy_dt(self) -> float:
         return self.physics_dt * self.control_decimation
 
@@ -120,44 +128,62 @@ class EnvConfig:
             raise ValueError("num_envs 必须为正数")
         if self.physics_dt <= 0.0 or self.control_decimation <= 0:
             raise ValueError("physics_dt 和 control_decimation 必须为正数")
-        if self.toa_grid_size < 3 or self.toa_grid_size % 2 == 0:
-            raise ValueError("toa_grid_size 应为不小于 3 的奇数")
+        for name in (
+            "maze_cell_size",
+            "arena_height",
+            "drone_radius",
+            "toa_resolution",
+            "min_start_goal_distance",
+            "episode_seconds",
+            "toa_crop_spacing",
+            "toa_safe_distance",
+            "physics_dt",
+            "depth_max_distance",
+            "goal_threshold",
+        ):
+            value = getattr(self, name)
+            if not isfinite(value) or value <= 0:
+                raise ValueError(f"{name} 必须为有限正数")
+        for name in ("safety_margin", "spawn_margin"):
+            if not isfinite(getattr(self, name)) or getattr(self, name) < 0:
+                raise ValueError(f"{name} 必须为有限非负数")
+        if self.maze_size < 5 or self.maze_size % 2 == 0:
+            raise ValueError("maze_size 必须为不小于 5 的奇数")
+        if min(self.train_map_count, self.eval_map_count, self.goals_per_map) <= 0:
+            raise ValueError("地图数和目标数必须为正数")
+        if min(self.seed, self.maze_seed) < 0:
+            raise ValueError("随机种子不能为负数")
+        if not 0 <= self.maze_wall_removal_probability <= 1:
+            raise ValueError("拆墙概率必须位于 [0, 1]")
+        if self.maze_cell_size <= 2 * (
+            self.drone_radius + self.safety_margin + self.spawn_margin
+        ):
+            raise ValueError("通道宽度不足以容纳无人机及出生余量")
+        if (
+            self.map_split not in ("train", "eval")
+            or self.evaluation_episodes_per_map < 0
+        ):
+            raise ValueError("地图池或评估配额不合法")
+        if self.toa_crop_size != 16:
+            raise ValueError("Critic TOA 输入必须保持 16×16")
         if self.toa_safe_distance <= 0.0 or not 0.0 < self.toa_slow_speed <= 1.0:
             raise ValueError("TOA 安全距离必须为正，慢速比例必须位于 (0, 1]")
-        if self.toa_normalization_max is not None and not (0.0 < self.toa_normalization_max < float("inf")):
-            raise ValueError("toa_normalization_max 必须为有限正数或 None")
-        if self.random_cylinder_count <= 0:
-            raise ValueError("random_cylinder_count 必须为正数")
-        if self.random_cylinder_count > 60:
-            raise ValueError("random_cylinder_count 不能超过 60")
-        from ta_sru.envs.curriculum import select_training_maze_curriculum_stage
-
-        select_training_maze_curriculum_stage(
-            elapsed_steps=0,
-            max_steps=self.total_training_steps,
-            stage_fractions=self.training_curriculum_stage_fractions,
-            maze_counts=self.training_curriculum_maze_counts,
-            cylinder_counts=self.training_curriculum_cylinder_counts,
-            maze_start_indices=self.training_curriculum_maze_start_indices,
-        )
-        if any(count > 6 for count in self.training_curriculum_maze_counts):
-            raise ValueError("课程阶段启用的迷宫数量不能超过 6")
-        if any(
-            start + count > 6
-            for start, count in zip(
-                self.training_curriculum_maze_start_indices,
-                self.training_curriculum_maze_counts,
-            )
+        if self.toa_normalization_max is not None and not (
+            0.0 < self.toa_normalization_max < float("inf")
         ):
-            raise ValueError("课程阶段启用的迷宫索引范围不能超过六种布局")
-        if any(count > 60 for count in self.training_curriculum_cylinder_counts):
-            raise ValueError("课程阶段启用的圆柱数量不能超过 60")
+            raise ValueError("toa_normalization_max 必须为有限正数或 None")
         if any(low >= high for low, high in zip(self.action_low, self.action_high)):
             raise ValueError("每个动作下界都必须小于上界")
         if not 0.0 < self.contact_penalty_ramp_fraction <= 1.0:
             raise ValueError("contact_penalty_ramp_fraction 必须位于 (0, 1]")
-        if not 0.0 < self.minimum_contact_force_threshold <= self.collision_force_threshold:
-            raise ValueError("minimum_contact_force_threshold 必须为正数且不能大于 collision_force_threshold")
+        if (
+            not 0.0
+            < self.minimum_contact_force_threshold
+            <= self.collision_force_threshold
+        ):
+            raise ValueError(
+                "minimum_contact_force_threshold 必须为正数且不能大于 collision_force_threshold"
+            )
 
 
 @dataclass
@@ -244,7 +270,7 @@ class TrainConfig:
     network: NetworkConfig = field(default_factory=NetworkConfig)
     # Recurrent PPO 算法超参数配置。
     ppo: PPOConfig = field(default_factory=PPOConfig)
-    # 缺省值保证旧循环 checkpoint 保持兼容。
+    # 算法名称与保存的网络结构共同校验。
     algorithm: str = "recurrent_ppo"
     # 整个训练任务计划采集的 transition 总数。
     total_timesteps: int = 70_000_000
@@ -264,12 +290,14 @@ class TrainConfig:
             raise ValueError("total_timesteps 必须为正数")
         if self.log_interval <= 0 or self.checkpoint_interval <= 0:
             raise ValueError("日志和 checkpoint 间隔必须为正数")
-        # 环境的两套课程均以训练器实际使用的总 transition 数为时间轴。
+        # 环境的接触课程均以训练器实际使用的总 transition 数为时间轴。
         self.env.total_training_steps = self.total_timesteps
         self.env.validate()
         self.network.validate()
         if self.algorithm not in ("ppo", "recurrent_ppo"):
             raise ValueError("algorithm 必须是 ppo 或 recurrent_ppo")
         if (self.algorithm == "ppo") != (self.network.recurrent_type == "none"):
-            raise ValueError("普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元")
+            raise ValueError(
+                "普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元"
+            )
         self.ppo.validate(self.env.num_envs)

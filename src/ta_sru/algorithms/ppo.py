@@ -15,7 +15,7 @@ from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
-from ta_sru.algorithms.buffer import CpuRolloutBuffer, CpuFeedForwardBuffer
+from ta_sru.algorithms.buffer import CpuFeedForwardBuffer, CpuRolloutBuffer
 from ta_sru.config import TrainConfig
 from ta_sru.models.actor_critic import (
     ACTION_TRANSFORM,
@@ -107,11 +107,6 @@ class RecurrentPPO:
             "success": self.recent_outcomes["success"],
             "collision": self.recent_outcomes["collision"],
             "timeout": self.recent_outcomes["timeout"],
-            "curriculum_stage": getattr(self.env, "training_curriculum_stage", 0),
-            "active_mazes": getattr(self.env, "training_curriculum_maze_count", 6),
-            "active_cylinders": getattr(
-                self.env, "training_curriculum_cylinder_count", 0
-            ),
             "contact_penalty_scale": getattr(
                 self.env, "training_curriculum_contact_scale", 1.0
             ),
@@ -465,9 +460,6 @@ class RecurrentPPO:
                         f"value_loss={metrics.get('value_loss', float('nan')):.4f} "
                         f"episodes={self.completed_episodes} outcomes={self.recent_outcomes} "
                         f"success_rate={success_rate} "
-                        f"curriculum={getattr(self.env, 'training_curriculum_stage', 0)} "
-                        f"mazes={getattr(self.env, 'training_curriculum_maze_count', 6)} "
-                        f"cylinders={getattr(self.env, 'training_curriculum_cylinder_count', 0)} "
                         f"cpu_buffer={memory_mb:.1f}MiB"
                     )
                     self.recent_outcomes = {
@@ -504,6 +496,7 @@ class RecurrentPPO:
                 "recent_episode_lengths": list(self.recent_episode_lengths),
                 "recent_episode_outcomes": list(self.recent_episode_outcomes),
                 "config": asdict(self.config),
+                "scene_manifest": getattr(self.env, "scene_manifest", None),
             },
             path,
         )
@@ -513,6 +506,14 @@ class RecurrentPPO:
             path, map_location=self.device, weights_only=True
         )
         require_supported_action_transform(checkpoint.get("action_transform"))
+        if hasattr(self.env, "scene_manifest"):
+            from ta_sru.evaluation import require_dfs_checkpoint
+            from ta_sru.scene_config import validate_resume_config
+
+            require_dfs_checkpoint(checkpoint)
+            validate_resume_config(checkpoint["config"]["env"], self.config.env)
+            if checkpoint["scene_manifest"] != self.env.scene_manifest:
+                raise ValueError("checkpoint 地图/目标池或 TOA 定义不一致")
         saved_algorithm = checkpoint["config"].get("algorithm", "recurrent_ppo")
         if saved_algorithm != self.config.algorithm:
             raise ValueError(
@@ -536,8 +537,7 @@ class RecurrentPPO:
         )
         if hasattr(self.env, "set_training_progress"):
             self.env.set_training_progress(self.timesteps)
-            # 构造训练器时环境已经按第 0 阶段 reset；恢复 checkpoint 后立即
-            # 再 reset 一次，使当前墙体和圆柱数量与恢复的训练步数一致。
+            # 恢复后开启新回合，清空策略状态和 TOA 历史，不恢复中途物理状态。
             self.observation, _ = self.env.reset()
             self.episode_starts = np.ones(self.env.num_envs, dtype=bool)
             self.recurrent_state = self.policy.initial_state(self.env.num_envs)

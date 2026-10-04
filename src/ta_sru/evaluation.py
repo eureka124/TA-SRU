@@ -1,23 +1,19 @@
-"""独立于仿真的评估配置、终局分类和按布局计数。"""
+"""独立于仿真的评估配置、终局分类和按地图计数。"""
 
 from __future__ import annotations
 
 from unicodedata import east_asian_width
 
-from ta_sru.envs.layouts import MAZE_LAYOUTS
+from ta_sru.envs.maze import SCENE_VERSION
 
 
 def configure_evaluation(values: dict) -> dict:
     """只覆盖本次评估配置，使训练进度不再影响场景或碰撞阈值。"""
     values = dict(values)
-    # 缺少该字段的历史 checkpoint 使用旧版固定归一化量程。
-    values.setdefault("toa_normalization_max", 255.0)
-    cylinders = values.get("training_curriculum_cylinder_counts", (60,))[-1]
+    if values.get("toa_normalization_max") is None:
+        raise ValueError("DFS 评估需要 checkpoint 中的训练 TOA 观测量程")
     values.update(
-        training_curriculum_stage_fractions=(0.0,),
-        training_curriculum_maze_counts=(len(MAZE_LAYOUTS),),
-        training_curriculum_maze_start_indices=(0,),
-        training_curriculum_cylinder_counts=(cylinders,),
+        map_split="eval",
         collision_force_threshold=0.1,
         minimum_contact_force_threshold=0.1,
     )
@@ -36,6 +32,7 @@ def load_evaluation_policy(checkpoint: dict, device: str):
 
     # 评估不经过 RecurrentPPO.load，必须在这里单独校验动作参数化方式。
     require_supported_action_transform(checkpoint.get("action_transform"))
+    require_dfs_checkpoint(checkpoint)
     values = checkpoint["config"]
     network = NetworkConfig(**values["network"])
     algorithm = values.get("algorithm", "recurrent_ppo")
@@ -66,14 +63,14 @@ def format_evaluation_table(summary: dict) -> str:
     """将评估汇总排成终端表格，兼顾中文列宽及未完成评估。"""
     rows = [
         [
-            "布局",
+            "地图",
             "回合数",
             "成功（数量/比例）",
             "碰撞（数量/比例）",
             "超时（数量/比例）",
         ]
     ]
-    for name, counts in [*summary["layouts"].items(), ("整体", summary["overall"])]:
+    for name, counts in [*summary["maps"].items(), ("整体", summary["overall"])]:
         row = [name, str(counts["episodes"])]
         for outcome in ("success", "collision", "timeout"):
             rate = counts[f"{outcome}_rate"]
@@ -102,13 +99,14 @@ def format_evaluation_table(summary: dict) -> str:
 
 
 class EvaluationStats:
-    def __init__(self, episodes_per_layout: int) -> None:
-        if episodes_per_layout <= 0:
-            raise ValueError("每种布局的评估回合数必须为正数")
-        self.target = episodes_per_layout
+    def __init__(self, episodes_per_map: int, map_names: list[str]) -> None:
+        if episodes_per_map <= 0:
+            raise ValueError("每张地图的评估回合数必须为正数")
+        if not map_names or len(set(map_names)) != len(map_names):
+            raise ValueError("评估地图清单必须非空且不重复")
+        self.target = episodes_per_map
         self.counts = {
-            layout.name: {"success": 0, "collision": 0, "timeout": 0}
-            for layout in MAZE_LAYOUTS
+            name: {"success": 0, "collision": 0, "timeout": 0} for name in map_names
         }
 
     def record(self, maze: str, info: dict) -> str | None:
@@ -142,8 +140,34 @@ class EvaluationStats:
             for key in ("success", "collision", "timeout")
         }
         return {
-            "episodes_per_layout": self.target,
+            "episodes_per_map": self.target,
             "complete": self.complete,
-            "layouts": {maze: rates(counts) for maze, counts in self.counts.items()},
+            "maps": {maze: rates(counts) for maze, counts in self.counts.items()},
             "overall": rates(total),
         }
+
+
+def require_dfs_checkpoint(checkpoint: dict) -> None:
+    manifest = checkpoint.get("scene_manifest")
+    if not isinstance(manifest, dict) or manifest.get("scene_version") != SCENE_VERSION:
+        raise ValueError(
+            "checkpoint 不属于当前 DFS/起点 TOA 归一化任务，不能恢复或评估旧场景"
+        )
+
+
+class MapQuotaScheduler:
+    """回合开始即预留配额，使任意环境数均可遍历完整地图清单。"""
+
+    def __init__(self, map_count: int, episodes_per_map: int) -> None:
+        if map_count <= 0 or episodes_per_map <= 0:
+            raise ValueError("地图数和评估配额必须为正数")
+        self.map_count = map_count
+        self.total = map_count * episodes_per_map
+        self.assigned = 0
+
+    def assign(self) -> int:
+        if self.assigned >= self.total:
+            return -1
+        selected = self.assigned % self.map_count
+        self.assigned += 1
+        return selected

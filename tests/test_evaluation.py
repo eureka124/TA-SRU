@@ -7,8 +7,7 @@ from unittest.mock import patch
 import torch
 
 from ta_sru.config import EnvConfig, NetworkConfig
-from ta_sru.envs.curriculum import select_training_maze_curriculum_stage
-from ta_sru.envs.layouts import MAZE_LAYOUTS
+from ta_sru.envs.maze import SCENE_VERSION
 from ta_sru.evaluation import (
     EvaluationStats,
     configure_evaluation,
@@ -31,6 +30,7 @@ class EvaluationTests(unittest.TestCase):
                 )
                 reference = AsymmetricRecurrentActorCritic(config).eval()
                 checkpoint = {
+                    "scene_manifest": {"scene_version": SCENE_VERSION},
                     "config": {
                         "network": asdict(config),
                         "algorithm": "ppo"
@@ -77,23 +77,12 @@ class EvaluationTests(unittest.TestCase):
                         )
                     torch.testing.assert_close(actual, expected)
 
-    def test_fixed_curriculum_at_all_training_steps(self):
-        original = {"training_curriculum_cylinder_counts": (10, 30, 60)}
+    def test_evaluation_keeps_training_scale_and_uses_eval_pool(self):
+        original = {"toa_normalization_max": 125.0}
         config = EnvConfig(**configure_evaluation(original))
-        self.assertEqual(original["training_curriculum_cylinder_counts"], (10, 30, 60))
-        for steps in (0, 100, config.total_training_steps * 2):
-            stage = select_training_maze_curriculum_stage(
-                steps,
-                config.total_training_steps,
-                config.training_curriculum_stage_fractions,
-                config.training_curriculum_maze_counts,
-                config.training_curriculum_cylinder_counts,
-                config.training_curriculum_maze_start_indices,
-            )
-            self.assertEqual(
-                (stage.maze_count, stage.maze_start_index, stage.cylinder_count),
-                (6, 0, 60),
-            )
+        self.assertEqual(original, {"toa_normalization_max": 125.0})
+        self.assertEqual(config.map_split, "eval")
+        self.assertEqual(config.toa_normalization_max, 125.0)
         self.assertEqual(config.collision_force_threshold, 0.1)
         self.assertEqual(config.minimum_contact_force_threshold, 0.1)
 
@@ -113,18 +102,18 @@ class EvaluationTests(unittest.TestCase):
             evaluation_outcome({})
 
     def test_quota_ignores_extra_parallel_completions(self):
-        stats = EvaluationStats(2)
+        stats = EvaluationStats(2, [f"eval_{i:03d}" for i in range(6)])
         self.assertIsNone(stats.summary()["overall"]["success_rate"])
-        for layout in MAZE_LAYOUTS:
+        for name in stats.counts:
             self.assertFalse(stats.complete)
-            self.assertEqual(stats.record(layout.name, {"success": True}), "success")
-            self.assertEqual(stats.record(layout.name, {"collided": True}), "collision")
-            self.assertIsNone(stats.record(layout.name, {"time_out": True}))
+            self.assertEqual(stats.record(name, {"success": True}), "success")
+            self.assertEqual(stats.record(name, {"collided": True}), "collision")
+            self.assertIsNone(stats.record(name, {"time_out": True}))
         self.assertTrue(stats.complete)
         summary = stats.summary()
         self.assertEqual(summary["overall"]["episodes"], 12)
         self.assertEqual(summary["overall"]["success_rate"], 0.5)
-        for counts in summary["layouts"].values():
+        for counts in summary["maps"].values():
             self.assertEqual(counts["episodes"], 2)
             self.assertEqual(
                 sum(

@@ -1,243 +1,341 @@
-"""六迷宫的静态 TOA（到达时间）地图。"""
+"""点目标 FMM、目标池及磁盘缓存，不依赖 Isaac Sim。"""
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import tempfile
+import warnings
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
+from zipfile import BadZipFile
 
 import numpy as np
 import skfmm
 
 from ta_sru.config import EnvConfig
-from ta_sru.envs.layouts import MAZE_LAYOUTS, wall_rectangle
+from ta_sru.envs.maze import (
+    GENERATOR_VERSION,
+    SCENE_VERSION,
+    MazeDefinition,
+    build_map_pools,
+    digest,
+)
+
+TOA_VERSION = "fmm-point-zero-v1"
 
 
-def layout_rectangles(
-    config: EnvConfig, layout_id: int
-) -> list[tuple[float, float, float, float]]:
-    """返回边界和内部墙体的 ``center_x, center_y, size_x, size_y``。"""
-
-    extent = config.arena_half_extent
-    thickness = config.wall_thickness
-    rectangles = [
-        (0.0, extent, 2 * extent, thickness),
-        (0.0, -extent, 2 * extent, thickness),
-        (extent, 0.0, thickness, 2 * extent),
-        (-extent, 0.0, thickness, 2 * extent),
-    ]
-    rectangles.extend(
-        wall_rectangle(wall, thickness, config.inner_wall_length)
-        for wall in MAZE_LAYOUTS[layout_id].walls
-    )
-    return rectangles
-
-
-def _rectangle_sdf(
-    grid_x: np.ndarray,
-    grid_y: np.ndarray,
-    rectangle: tuple[float, float, float, float],
-    inflation: float,
-) -> np.ndarray:
-    center_x, center_y, size_x, size_y = rectangle
-    dx = np.abs(grid_x - center_x) - (size_x / 2 + inflation)
-    dy = np.abs(grid_y - center_y) - (size_y / 2 + inflation)
-    outside = np.hypot(np.maximum(dx, 0.0), np.maximum(dy, 0.0))
-    return outside + np.minimum(np.maximum(dx, dy), 0.0)
-
-
-def build_toa_map(
-    config: EnvConfig,
-    layout_id: int,
-    goal_xy: tuple[float, float],
-) -> np.ndarray:
-    """用 Fast Marching Method 构建一张到达时间图。"""
-
-    coordinates = np.linspace(
+def coordinates(config: EnvConfig) -> np.ndarray:
+    return np.linspace(
         -config.arena_half_extent,
         config.arena_half_extent,
         config.toa_grid_size,
         dtype=np.float32,
     )
-    spacing = float(coordinates[1] - coordinates[0])
-    grid_x, grid_y = np.meshgrid(coordinates, coordinates, indexing="xy")
-    clearance = np.full_like(grid_x, 1.0e6, dtype=np.float32)
-    for rectangle in layout_rectangles(config, layout_id):
-        clearance = np.minimum(
-            clearance,
-            _rectangle_sdf(grid_x, grid_y, rectangle, config.drone_radius),
+
+
+def obstacle_clearance(config: EnvConfig, maze: MazeDefinition) -> np.ndarray:
+    grid_x, grid_y = np.meshgrid(coordinates(config), coordinates(config))
+    clearance = np.full(grid_x.shape, np.inf, dtype=np.float32)
+    for x, y, sx, sy in maze.rectangles():
+        dx, dy = np.abs(grid_x - x) - sx / 2, np.abs(grid_y - y) - sy / 2
+        sdf = np.hypot(np.maximum(dx, 0), np.maximum(dy, 0)) + np.minimum(
+            np.maximum(dx, dy), 0
         )
+        clearance = np.minimum(clearance, sdf)
+    return clearance - (config.drone_radius + config.safety_margin)
 
-    blocked = clearance <= 0.0
-    speed = np.ones_like(clearance)
-    near_wall = clearance <= config.toa_safe_distance
-    speed[near_wall] = config.toa_slow_speed + (1.0 - config.toa_slow_speed) * (
-        np.maximum(clearance[near_wall], 0.0) / config.toa_safe_distance
+
+def components(free: np.ndarray) -> np.ndarray:
+    """四连通分量避免对角穿墙，外圈由边界墙封闭。"""
+    labels = np.full(free.shape, -1, dtype=np.int32)
+    component = 0
+    height, width = free.shape
+    for y, x in zip(*np.nonzero(free)):
+        if labels[y, x] >= 0:
+            continue
+        labels[y, x] = component
+        queue = deque([(y, x)])
+        while queue:
+            row, col = queue.popleft()
+            for nr, nc in (
+                (row - 1, col),
+                (row + 1, col),
+                (row, col - 1),
+                (row, col + 1),
+            ):
+                if (
+                    0 <= nr < height
+                    and 0 <= nc < width
+                    and free[nr, nc]
+                    and labels[nr, nc] < 0
+                ):
+                    labels[nr, nc] = component
+                    queue.append((nr, nc))
+        component += 1
+    return labels
+
+
+def sample_goals(
+    config: EnvConfig, maze: MazeDefinition, clearance: np.ndarray, labels: np.ndarray
+) -> np.ndarray:
+    candidates = np.argwhere(clearance > config.spawn_margin)
+    rng = np.random.default_rng(np.random.SeedSequence([maze.seed, 1701]))
+    order = rng.permutation(len(candidates))
+    goals = []
+    for index in order:
+        goal = candidates[index]
+        same = labels[candidates[:, 0], candidates[:, 1]] == labels[tuple(goal)]
+        distance = np.linalg.norm((candidates - goal) * config.toa_spacing, axis=1)
+        if np.any(same & (distance >= config.min_start_goal_distance)):
+            goals.append(goal)
+            if len(goals) == config.goals_per_map:
+                return np.asarray(goals, dtype=np.int32)
+    raise ValueError(f"{maze.name} 无法采样足够目标及可达起点")
+
+
+def cache_key(config: EnvConfig, maze: MazeDefinition, goal: np.ndarray) -> str:
+    return digest(
+        {
+            "version": TOA_VERSION,
+            "solver": skfmm.__version__,
+            "map": maze.content_hash,
+            "goal": goal.tolist(),
+            "shape": config.toa_grid_size,
+            "spacing": config.toa_spacing,
+            "radius": config.drone_radius,
+            "margin": config.safety_margin,
+            "safe": config.toa_safe_distance,
+            "slow": config.toa_slow_speed,
+        }
     )
-    speed = np.ma.array(np.clip(speed, 1.0e-3, 1.0), mask=blocked)
-
-    goal_radius = max(1.5 * spacing, 1.0e-3)
-    level_set = np.hypot(grid_x - goal_xy[0], grid_y - goal_xy[1]) - goal_radius
-    level_set = np.ma.array(level_set, mask=blocked)
-    arrival_time = skfmm.travel_time(level_set, speed, dx=spacing)
-    if np.ma.isMaskedArray(arrival_time):
-        arrival_time = arrival_time.filled(1.0e6)
-    arrival_time = np.asarray(arrival_time, dtype=np.float32)
-
-    goal_x = int(np.argmin(np.abs(coordinates - goal_xy[0])))
-    goal_y = int(np.argmin(np.abs(coordinates - goal_xy[1])))
-    goal_time = float(arrival_time[goal_y, goal_x])
-    if np.isfinite(goal_time):
-        arrival_time = np.maximum(arrival_time - goal_time, 0.0)
-    return arrival_time
 
 
-def build_toa_bank(config: EnvConfig) -> np.ndarray:
-    """构建 6 个迷宫 × 2 组路线 × 正反方向，共 24 张共享地图。"""
+def build_toa_map(
+    config: EnvConfig, clearance: np.ndarray, goal: np.ndarray
+) -> np.ndarray:
+    """目标栅格为唯一零值源点，障碍及不可达区域保存为正无穷。"""
+    blocked = clearance <= 0
+    if blocked[tuple(goal)]:
+        raise ValueError("TOA 目标位于障碍内")
+    speed = config.toa_slow_speed + (1 - config.toa_slow_speed) * np.clip(
+        clearance / config.toa_safe_distance, 0, 1
+    )
+    phi = np.ones(clearance.shape, dtype=np.float64)
+    phi[tuple(goal)] = 0.0
+    arrival = skfmm.travel_time(
+        np.ma.array(phi, mask=blocked),
+        np.ma.array(speed, mask=blocked),
+        dx=config.toa_spacing,
+    )
+    values = np.asarray(np.ma.filled(arrival, np.inf), dtype=np.float32)
+    values[blocked] = np.inf
+    values[tuple(goal)] = 0.0
+    return values
 
-    maps = []
-    for layout_id, layout in enumerate(MAZE_LAYOUTS):
-        for start, goal in layout.routes:
-            maps.append(build_toa_map(config, layout_id, goal))
-            maps.append(build_toa_map(config, layout_id, start))
-    return np.stack(maps).astype(np.float32, copy=False)
+
+def cached_toa(
+    config: EnvConfig,
+    maze: MazeDefinition,
+    clearance: np.ndarray,
+    labels: np.ndarray,
+    goal: np.ndarray,
+) -> tuple[np.ndarray, str]:
+    key = cache_key(config, maze, goal)
+    destination = (
+        Path(config.toa_cache_dir).expanduser() / f"{key}.npz"
+        if config.toa_cache_dir
+        else None
+    )
+    reachable = labels == labels[tuple(goal)]
+    if destination:
+        try:
+            with np.load(destination, allow_pickle=False) as cached:
+                values = cached["toa"]
+                checksum = hashlib.sha256(values.tobytes()).hexdigest()
+                if (
+                    str(cached["key"]) == key
+                    and str(cached["checksum"]) == checksum
+                    and values.dtype == np.float32
+                    and values.shape == clearance.shape
+                    and np.array_equal(np.isfinite(values), reachable)
+                    and values[tuple(goal)] == 0
+                    and np.count_nonzero(values == 0) == 1
+                    and np.all(values >= 0)
+                ):
+                    return values, key
+        except (OSError, ValueError, KeyError, EOFError, BadZipFile):
+            pass
+    values = build_toa_map(config, clearance, goal)
+    if (
+        not np.array_equal(np.isfinite(values), reachable)
+        or np.count_nonzero(values == 0) != 1
+    ):
+        raise ValueError(f"{maze.name} FMM 可达性或点目标零值异常")
+    if destination:
+        temporary = None
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                dir=destination.parent, suffix=".npz", delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                np.savez_compressed(
+                    stream,
+                    toa=values,
+                    key=key,
+                    checksum=hashlib.sha256(values.tobytes()).hexdigest(),
+                )
+            os.replace(temporary, destination)
+        except OSError as exc:
+            warnings.warn(f"TOA 磁盘缓存不可写，使用内存缓存：{exc}", stacklevel=2)
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    return values, key
 
 
-def _traversable_toa_max(values: np.ndarray) -> float:
-    """返回剔除墙体/不可达区域后的最大 TOA。"""
+@dataclass
+class ToaBank:
+    maps: list[MazeDefinition]
+    goals: np.ndarray
+    values: np.ndarray
+    starts: list[np.ndarray]
+    manifest: dict
 
-    traversable = np.isfinite(values) & (values < 1.0e5)
-    if not np.any(traversable):
-        return 1.0
-    return max(float(np.max(values[traversable])), 1.0e-6)
+    def sample(
+        self, config: EnvConfig, env_id: int, episode_id: int, map_id: int | None = None
+    ) -> tuple[int, int, np.ndarray, float]:
+        rng = np.random.default_rng(
+            np.random.SeedSequence([config.seed, 2309, env_id, episode_id])
+        )
+        map_id = int(rng.integers(len(self.maps))) if map_id is None else map_id
+        goal_id = int(rng.integers(config.goals_per_map))
+        bank_id = map_id * config.goals_per_map + goal_id
+        choices = self.starts[bank_id]
+        row, col = choices[int(rng.integers(len(choices)))]
+        xy = coordinates(config)[[col, row]]
+        return map_id, goal_id, xy, float(self.values[bank_id, row, col])
+
+
+def build_toa_bank(config: EnvConfig) -> ToaBank:
+    pools = build_map_pools(config)
+    metadata = {}
+    values, goals_xy, starts = [], [], []
+    coords = coordinates(config)
+    for split, maps in pools.items():
+        records = []
+        for maze in maps:
+            clearance = obstacle_clearance(config, maze)
+            labels = components(clearance > 0)
+            goals = sample_goals(config, maze, clearance, labels)
+            records.append(
+                {
+                    "name": maze.name,
+                    "seed": maze.seed,
+                    "hash": maze.content_hash,
+                    "goals": goals.tolist(),
+                }
+            )
+            if split != config.map_split:
+                continue
+            candidates = np.argwhere(clearance > config.spawn_margin)
+            for goal in goals:
+                toa, _ = cached_toa(config, maze, clearance, labels, goal)
+                valid = np.isfinite(toa[candidates[:, 0], candidates[:, 1]])
+                valid &= toa[candidates[:, 0], candidates[:, 1]] > 1e-6
+                valid &= (
+                    np.linalg.norm((candidates - goal) * config.toa_spacing, axis=1)
+                    >= config.min_start_goal_distance
+                )
+                if not valid.any():
+                    raise ValueError(f"{maze.name} 目标没有合法起点")
+                starts.append(candidates[valid].astype(np.int32))
+                values.append(toa)
+                goals_xy.append(coords[goal[::-1]])
+        metadata[split] = records
+    manifest = {
+        "scene_version": SCENE_VERSION,
+        "generator": GENERATOR_VERSION,
+        "toa_version": TOA_VERSION,
+        "solver": skfmm.__version__,
+        "toa_reward_normalization": "episode_start",
+        "pools": metadata,
+        "grid_size": config.toa_grid_size,
+        "spacing": config.toa_spacing,
+        "safety": {
+            "drone_radius": config.drone_radius,
+            "margin": config.safety_margin,
+            "spawn_margin": config.spawn_margin,
+            "min_distance": config.min_start_goal_distance,
+        },
+        "speed": {
+            "safe_distance": config.toa_safe_distance,
+            "slow": config.toa_slow_speed,
+        },
+        "success_radius": config.goal_threshold,
+    }
+    bank = ToaBank(
+        pools[config.map_split],
+        np.asarray(goals_xy, dtype=np.float32),
+        np.stack(values),
+        starts,
+        manifest,
+    )
+    byte_count = bank.values.nbytes + bank.goals.nbytes + sum(v.nbytes for v in starts)
+    finite = bank.values[np.isfinite(bank.values)]
+    print(
+        f"[DFS] {config.map_split}: {len(bank.maps)} 张地图 × {config.goals_per_map} 目标; "
+        f"TOA {bank.values.nbytes / 2**20:.2f} MiB; CPU 池 {byte_count / 2**20:.2f} MiB; "
+        f"有效 TOA P50/P95/max={np.percentile(finite, [50, 95, 100]).round(2).tolist()}"
+    )
+    return bank
 
 
 def resolve_toa_normalization_max(
     values: np.ndarray, configured: float | None
 ) -> float:
-    """以全部共享地图的有效范围统一缩放，排除墙体和不可达哨兵值。"""
     if configured is not None:
-        if not np.isfinite(configured) or configured <= 0.0:
-            raise ValueError("TOA 归一化量程必须为有限正数")
+        if not np.isfinite(configured) or configured <= 0:
+            raise ValueError("TOA 观测量程必须为有限正数")
         return float(configured)
-    return _traversable_toa_max(values)
-
-
-def _toa_rgb(values: np.ndarray) -> np.ndarray:
-    """使用蓝到红的 HSV 色相渐变渲染一张 TOA 图。"""
-
-    blocked = ~np.isfinite(values) | (values >= 1.0e5)
-    normalized = np.clip(values / _traversable_toa_max(values), 0.0, 1.0)
-
-    # HSV: 最短到达时间为蓝色，最大到达时间为红色。
-    hue = (1.0 - normalized) * (2.0 / 3.0)
-    sector = np.floor(hue * 6.0).astype(np.int64)
-    fraction = hue * 6.0 - sector
-    value = np.ones_like(hue)
-    zero = np.zeros_like(hue)
-    inverse = 1.0 - fraction
-    choices = (
-        np.stack((value, fraction, zero), axis=-1),
-        np.stack((inverse, value, zero), axis=-1),
-        np.stack((zero, value, fraction), axis=-1),
-        np.stack((zero, inverse, value), axis=-1),
-        np.stack((fraction, zero, value), axis=-1),
-        np.stack((value, zero, inverse), axis=-1),
-    )
-    rgb = np.choose((sector % 6)[..., None], choices) * 255.0
-    rgb[blocked] = (20, 20, 20)
-    # 数组第 0 行对应最小 y；保存时翻转，使地图上方对应世界坐标 +Y。
-    return np.flipud(rgb.astype(np.uint8))
+    finite = values[np.isfinite(values)]
+    if not finite.size or np.max(finite) <= 0:
+        raise ValueError("TOA 池没有有效正值")
+    return float(np.max(finite))
 
 
 def save_toa_global_maps(
-    config: EnvConfig,
-    toa_bank: np.ndarray,
-    output_dir: str | Path,
+    config: EnvConfig, bank: ToaBank, output_dir: str | Path
 ) -> list[Path]:
-    """为六种迷宫各保存一张 4×1 全局 TOA 汇总图和原始数组。
-
-    每张 PNG 依次包含路线 1 正向/反向、路线 2 正向/反向。原始 ``npz``
-    中保留相同的四张浮点 TOA 图，便于后续分析。
-    """
-
-    from PIL import Image, ImageDraw
-
-    expected_maps = len(MAZE_LAYOUTS) * 4
-    if toa_bank.shape != (expected_maps, config.toa_grid_size, config.toa_grid_size):
-        raise ValueError(
-            f"TOA bank 形状应为 {(expected_maps, config.toa_grid_size, config.toa_grid_size)}，"
-            f"实际为 {toa_bank.shape}"
-        )
+    from PIL import Image
 
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
-    labels = (
-        "route 1 forward",
-        "route 1 reverse",
-        "route 2 forward",
-        "route 2 reverse",
-    )
-    tile_size = config.toa_grid_size
-    label_height = 24
-    gap = 8
-    canvas_size = 4 * tile_size + 3 * gap, tile_size + label_height
-    saved: list[Path] = []
-
-    for layout_id, layout in enumerate(MAZE_LAYOUTS):
-        maps = toa_bank[layout_id * 4 : layout_id * 4 + 4]
-        canvas = Image.new("RGB", canvas_size, (245, 245, 245))
-        draw = ImageDraw.Draw(canvas)
-        for map_id, (values, label) in enumerate(zip(maps, labels)):
-            column, row = map_id, 0
-            left = column * (tile_size + gap)
-            top = row * (tile_size + label_height + gap)
-            maximum = _traversable_toa_max(values)
-            draw.text(
-                (left + 4, top + 4),
-                f"{label} | traversable max: {maximum:.2f}",
-                fill=(20, 20, 20),
+    saved = []
+    for map_id, maze in enumerate(bank.maps):
+        for goal_id in range(config.goals_per_map):
+            index = map_id * config.goals_per_map + goal_id
+            values = bank.values[index]
+            maximum = resolve_toa_normalization_max(values, None)
+            normalized = np.clip(np.nan_to_num(values / maximum, posinf=1), 0, 1)
+            rgb = np.stack(
+                (normalized, 1 - normalized, np.zeros_like(normalized)), axis=-1
             )
-            tile = Image.fromarray(_toa_rgb(values), mode="RGB")
-            canvas.paste(tile, (left, top + label_height))
-
-            route_id = map_id // 2
-            reversed_direction = bool(map_id % 2)
-            route_start, route_goal = layout.routes[route_id]
-            start, goal = (
-                (route_goal, route_start)
-                if reversed_direction
-                else (route_start, route_goal)
+            rgb[~np.isfinite(values)] = 0.08
+            path = destination / f"{maze.name}_goal_{goal_id:02d}.png"
+            Image.fromarray(np.flipud((rgb * 255).astype(np.uint8))).save(path)
+            np.savez_compressed(
+                path.with_suffix(".npz"),
+                toa=values,
+                goal=bank.goals[index],
+                extent=config.arena_half_extent,
             )
-
-            def pixel(
-                point: tuple[float, float], left: int = left, top: int = top
-            ) -> tuple[int, int]:
-                scale = (tile_size - 1) / (2.0 * config.arena_half_extent)
-                x = round((point[0] + config.arena_half_extent) * scale) + left
-                y = (
-                    round((config.arena_half_extent - point[1]) * scale)
-                    + top
-                    + label_height
-                )
-                return x, y
-
-            for point, color in ((start, (0, 255, 255)), (goal, (255, 70, 70))):
-                x, y = pixel(point)
-                radius = max(3, tile_size // 100)
-                draw.ellipse(
-                    (x - radius, y - radius, x + radius, y + radius), fill=color
-                )
-
-        image_path = destination / f"{layout.name}_toa_global.png"
-        data_path = destination / f"{layout.name}_toa_global.npz"
-        canvas.save(image_path)
-        np.savez_compressed(
-            data_path,
-            toa=maps,
-            labels=np.asarray(labels),
-            arena_half_extent=np.float32(config.arena_half_extent),
-        )
-        saved.append(image_path)
+            saved.append(path)
+    (destination / "map_manifest.json").write_text(json.dumps(bank.manifest, indent=2))
     return saved
-
-
-__all__ = ["build_toa_bank", "build_toa_map", "save_toa_global_maps"]

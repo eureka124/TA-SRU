@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--steps", type=int, default=None, help="可选的提前停止步数上限"
     )
-    parser.add_argument("--episodes-per-layout", type=int, default=1000)
+    parser.add_argument("--episodes-per-map", type=int, default=1000)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--network-device", default=None)
     parser.add_argument(
@@ -34,9 +34,9 @@ def parse_args() -> argparse.Namespace:
     )
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
-    if args.num_envs < 6:
-        parser.error("--num-envs 至少为 6，确保覆盖所有布局")
-    if args.episodes_per_layout <= 0 or (args.steps is not None and args.steps <= 0):
+    if args.num_envs <= 0:
+        parser.error("--num-envs 必须为正数")
+    if args.episodes_per_map <= 0 or (args.steps is not None and args.steps <= 0):
         parser.error("回合数量和步数上限必须为正数")
     return args
 
@@ -70,20 +70,22 @@ def main() -> int:
         stage = "导入项目模块"
         from ta_sru.config import EnvConfig
         from ta_sru.envs import IsaacLabWrapper, NavigationEnv, make_isaac_env_cfg
-        from ta_sru.envs.layouts import MAZE_LAYOUTS
         from ta_sru.evaluation import (
             EvaluationStats,
             configure_evaluation,
             format_evaluation_table,
             load_evaluation_policy,
+            require_dfs_checkpoint,
         )
 
         stage = "读取 checkpoint"
         checkpoint_path = Path(args.checkpoint).resolve()
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        require_dfs_checkpoint(checkpoint)
         values = checkpoint["config"]
         env_values = configure_evaluation(values["env"])
         env_values["num_envs"] = args.num_envs
+        env_values["evaluation_episodes_per_map"] = args.episodes_per_map
         run_dir = (
             checkpoint_path.parent.parent
             if checkpoint_path.parent.name == "checkpoints"
@@ -100,25 +102,38 @@ def main() -> int:
             / datetime.now(timezone.utc).astimezone().strftime("eval_%Y%m%d_%H%M%S_%f")
         )
         results_dir.mkdir(parents=True, exist_ok=False)
-        stats = EvaluationStats(args.episodes_per_layout)
+        stats = EvaluationStats(
+            args.episodes_per_map,
+            [item["name"] for item in checkpoint["scene_manifest"]["pools"]["eval"]],
+        )
         report_metadata = {
             "checkpoint": str(checkpoint_path),
             "num_envs": args.num_envs,
             "collision_force_threshold": task_config.collision_force_threshold,
-            "cylinders": min(
-                task_config.training_curriculum_cylinder_counts[0],
-                task_config.random_cylinder_count,
-            ),
+            "scene_manifest": checkpoint["scene_manifest"],
+            "seed": task_config.seed,
+            "toa_normalization_max": task_config.toa_normalization_max,
         }
         episode_file = (results_dir / "episodes.csv").open(
             "w", encoding="utf-8", newline=""
         )
         episode_writer = csv.DictWriter(
             episode_file,
-            fieldnames=("maze", "env_id", "episode", "outcome", "steps", "return"),
+            fieldnames=(
+                "maze",
+                "map_hash",
+                "goal_id",
+                "start_xy",
+                "episode_start_toa",
+                "env_id",
+                "episode",
+                "outcome",
+                "steps",
+                "return",
+            ),
         )
         episode_writer.writeheader()
-        print(f"评估结果：{results_dir}；每种布局 {stats.target} 回合", flush=True)
+        print(f"评估结果：{results_dir}；每张地图 {stats.target} 回合", flush=True)
         print(f"循环单元：{values['network']['recurrent_type']}")
         if args.debug:
             print(f"调试输出：{task_config.debug_output_dir}")
@@ -126,6 +141,8 @@ def main() -> int:
         stage = "创建仿真环境"
         isaac_config = make_isaac_env_cfg(task_config, sim_device=args.device)
         env = IsaacLabWrapper(NavigationEnv(isaac_config, task_config))
+        if env.scene_manifest != checkpoint["scene_manifest"]:
+            raise ValueError("评估地图/目标池与 checkpoint 记录不一致")
 
         stage = "创建策略并加载 checkpoint"
         policy = load_evaluation_policy(checkpoint, args.network_device or args.device)
@@ -139,8 +156,8 @@ def main() -> int:
             debug_recorder = PlayDebugRecorder(
                 task_config.debug_output_dir,
                 task_config.policy_dt,
-                max_episodes_per_layout=min(4, args.episodes_per_layout),
-                episodes_per_layout=args.episodes_per_layout,
+                max_episodes_per_map=min(4, args.episodes_per_map),
+                episodes_per_map=args.episodes_per_map,
             )
             env.env.play_debug_recorder = debug_recorder
             print(
@@ -148,7 +165,7 @@ def main() -> int:
                 flush=True,
             )
             print(
-                f"[DEBUG] 每种布局按开始顺序录制第 {debug_recorder.selection_range[0]}–{debug_recorder.selection_range[1]} 个回合",
+                f"[DEBUG] 每张地图按开始顺序录制第 {debug_recorder.selection_range[0]}–{debug_recorder.selection_range[1]} 个回合",
                 flush=True,
             )
         state = policy.initial_state(env.num_envs)
@@ -178,22 +195,29 @@ def main() -> int:
                 )
             if debug_recorder is not None:
                 debug_recorder.begin_step(env.env, action)
-            # 在自动重置前保留本回合布局，避免终局归入下一回合。
-            maze_ids = env.env.maze_ids.detach().cpu().tolist()
             observation, reward, terminated, truncated, infos = env.step(action)
             step += 1
             episode_lengths += 1
             episode_returns += reward
             episode_starts = terminated | truncated
             for env_id in np.flatnonzero(episode_starts):
-                maze = MAZE_LAYOUTS[maze_ids[env_id]].name
-                outcome = stats.record(maze, infos[env_id])
+                info = infos[env_id]
+                maze = env.env.map_names[info["map_id"]]
+                outcome = (
+                    stats.record(maze, info) if info["evaluation_active"] else None
+                )
                 if outcome is not None:
                     episode_writer.writerow(
                         {
                             "maze": maze,
+                            "map_hash": env.env.map_definitions[
+                                info["map_id"]
+                            ].content_hash,
+                            "goal_id": info["goal_id"],
+                            "start_xy": json.dumps(info["start_xy"]),
+                            "episode_start_toa": info["episode_start_toa"],
                             "env_id": int(env_id),
-                            "episode": sum(stats.counts[maze].values()),
+                            "episode": info["episode_id"],
                             "outcome": outcome,
                             "steps": int(episode_lengths[env_id]),
                             "return": float(episode_returns[env_id]),
@@ -240,7 +264,7 @@ def main() -> int:
                 )
                 print(
                     f"\n评估{'完成' if stats.complete else '提前结束'}"
-                    f"（每种布局目标：{stats.target} 回合）\n"
+                    f"（每张地图目标：{stats.target} 回合）\n"
                     f"{format_evaluation_table(report)}\n"
                     f"评估结果：{results_dir}",
                     flush=True,

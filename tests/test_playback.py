@@ -15,43 +15,23 @@ import torch
 from ta_sru.debug.playback import PlayDebugRecorder, depth_to_gray
 
 
-class _Scene(dict):
-    env_origins = torch.tensor([[0.0, 0.0, 0.0], [50.0, 0.0, 0.0]])
-
-
 def _env():
-    scene = _Scene()
     quaternion = torch.tensor([[1.0, 0.0, 0.0, 0.0], [2**-0.5, 0.0, 0.0, 2**-0.5]])
-    wall = SimpleNamespace(
-        data=SimpleNamespace(
-            root_pos_w=torch.tensor([[1.0, 2.0, 2.0], [51.0, 2.0, 2.0]]),
-            root_quat_w=quaternion.clone(),
-        ),
-        cfg=SimpleNamespace(spawn=SimpleNamespace(size=(12.0, 0.7, 4.0))),
-    )
-    for side in ("north", "south", "east", "west"):
-        scene[f"boundary_{side}"] = wall
     depth = torch.arange(2 * 4 * 8, dtype=torch.float32).reshape(2, 4, 8, 1) / 2
     depth[0, 0, 0, 0] = torch.inf
     depth[0, 0, 1, 0] = torch.nan
     return SimpleNamespace(
         num_envs=2,
-        scene=scene,
+        map_origins=torch.tensor([[0.0, 0.0, 0.0], [50.0, 0.0, 0.0]]),
+        map_definitions=[SimpleNamespace(rectangles=lambda: [(1, 2, 12, 2)], content_hash="first"),
+                         SimpleNamespace(rectangles=lambda: [(-2, 6, 2, 4)], content_hash="second")],
+        map_names=["train_000", "train_001"],
+        goal_ids=torch.tensor([0, 1]),
+        episode_start_toa=torch.tensor([25.0, 40.0]),
+        evaluation_active=torch.tensor([True, True]),
         task=SimpleNamespace(arena_half_extent=20.0, depth_max_distance=10.0),
-        inner_walls=[wall],
-        maze_ids=torch.tensor([0, 1]),
+        map_ids=torch.tensor([0, 1]),
         goal_positions=torch.tensor([[5.0, 8.0, 2.0], [55.0, 8.0, 2.0]]),
-        cylinder_radii=torch.tensor([0.3, 0.6]),
-        random_cylinders=SimpleNamespace(
-            data=SimpleNamespace(
-                object_pos_w=torch.tensor(
-                    [
-                        [[3.0, 4.0, 1.0], [0.0, 0.0, -10.0]],
-                        [[53.0, 4.0, 1.0], [50.0, 0.0, -10.0]],
-                    ]
-                ),
-            )
-        ),
         camera=SimpleNamespace(
             data=SimpleNamespace(output={"distance_to_image_plane": depth})
         ),
@@ -100,7 +80,6 @@ class PlaybackTests(unittest.TestCase):
             # 第二个环境已重置，第一个环境仍处于原回合。
             env.robot.data.root_pos_w[1, :2] = torch.tensor([45.0, -2.0])
             env.camera.data.output["distance_to_image_plane"][1] = 7
-            env.random_cylinders.data.object_pos_w[1, 0, :2] = torch.tensor([48.0, 6.0])
             env.extras["collided"][1] = False
             recorder.begin_step(env, requested)
             env.robot.data.root_pos_w[:, 0] += 1
@@ -127,8 +106,8 @@ class PlaybackTests(unittest.TestCase):
                 )
             reset_data = json.loads((reset / "telemetry.json").read_text())
             self.assertEqual(reset_data["start"], [-5, -2])
-            self.assertEqual(reset_data["cylinders"][0]["xy"], [-2, 6])
-            self.assertEqual(len(reset_data["cylinders"]), 1)
+            self.assertEqual(reset_data["rectangles"][0]["xy"], [-2, 6])
+            self.assertEqual(reset_data["map_hash"], "second")
             self.assertEqual(reset_data["samples"][0]["xy"], [-4, -2])
             self.assertEqual(reset_data["samples"][0]["t"], 1 / 24)
             self.assertEqual(reset_data["outcome"], "interrupted")
@@ -162,17 +141,17 @@ class PlaybackTests(unittest.TestCase):
 
     def test_shared_layout_quota_and_collision_precedence(self):
         env = _env()
-        env.maze_ids[:] = 0
+        env.map_ids[:] = 0
         env.extras["collided"][:] = True
         env.extras["success"][:] = True
         with TemporaryDirectory() as temporary:
-            recorder = PlayDebugRecorder(temporary, 0.1, max_episodes_per_layout=3)
+            recorder = PlayDebugRecorder(temporary, 0.1, max_episodes_per_map=3)
             for _ in range(4):
                 recorder.begin_step(env, env.actions)
                 recorder.capture(env, torch.tensor([True, True]))
             recorder.close()
             self.assertEqual(len(recorder.entries), 3)
-            self.assertEqual(recorder.layout_counts, {"maze_01": 3})
+            self.assertEqual(recorder.map_counts, {"train_000": 3})
             self.assertEqual(recorder.episodes, {})
             self.assertTrue(
                 all(entry["outcome"] == "collision" for entry in recorder.entries)
@@ -181,7 +160,7 @@ class PlaybackTests(unittest.TestCase):
     def test_limited_recorder_does_not_save_partial_episode(self):
         env = _env()
         with TemporaryDirectory() as temporary:
-            recorder = PlayDebugRecorder(temporary, 0.1, max_episodes_per_layout=4)
+            recorder = PlayDebugRecorder(temporary, 0.1, max_episodes_per_map=4)
             recorder.begin_step(env, env.actions)
             recorder.capture(env, torch.tensor([False, False]))
             recorder.close()
@@ -190,11 +169,11 @@ class PlaybackTests(unittest.TestCase):
 
     def test_middle_selection_follows_starts_not_completions(self):
         env = _env()
-        env.maze_ids[:] = 0
+        env.map_ids[:] = 0
         env.extras["success"][:] = True
         with TemporaryDirectory() as temporary:
             recorder = PlayDebugRecorder(
-                temporary, 0.1, max_episodes_per_layout=4, episodes_per_layout=6
+                temporary, 0.1, max_episodes_per_map=4, episodes_per_map=6
             )
             self.assertEqual(recorder.selection_range, (2, 5))
             # 第 2 个回合持续三步，第 3 个先结束，第 4 个与它同时结束。
@@ -206,28 +185,28 @@ class PlaybackTests(unittest.TestCase):
             recorder.close()
             self.assertEqual(len(recorder.entries), 4)
             self.assertEqual(
-                [entry["layout_start_episode"] for entry in recorder.entries],
+                [entry["map_start_episode"] for entry in recorder.entries],
                 [3, 2, 4, 5],
             )
             selected = next(
                 entry
                 for entry in recorder.entries
-                if entry["layout_start_episode"] == 2
+                if entry["map_start_episode"] == 2
             )
             self.assertEqual(selected["frames"], 3)
             data = json.loads(
                 (recorder.output_dir / selected["path"] / "telemetry.json").read_text()
             )
-            self.assertEqual(data["layout_start_episode"], 2)
+            self.assertEqual(data["map_start_episode"], 2)
             self.assertEqual(recorder.episodes, {})
 
     def test_middle_selection_skips_early_episodes_without_recording(self):
         env = _env()
-        env.maze_ids[:] = 0
+        env.map_ids[:] = 0
         env.extras["success"][:] = True
         with TemporaryDirectory() as temporary:
             recorder = PlayDebugRecorder(
-                temporary, 0.1, max_episodes_per_layout=4, episodes_per_layout=1000
+                temporary, 0.1, max_episodes_per_map=4, episodes_per_map=1000
             )
             self.assertEqual(recorder.selection_range, (499, 502))
             for _ in range(249):
@@ -239,7 +218,7 @@ class PlaybackTests(unittest.TestCase):
                 recorder.capture(env, torch.tensor([True, True]))
             recorder.close()
             self.assertEqual(
-                [entry["layout_start_episode"] for entry in recorder.entries],
+                [entry["map_start_episode"] for entry in recorder.entries],
                 [499, 500, 501, 502],
             )
 

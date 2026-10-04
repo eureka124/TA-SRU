@@ -50,10 +50,19 @@ TRAJECTORY_POINT_SPACING = 0.15
 
 def _spawn_dfs_mesh(prim_path, cfg, translation=None, orientation=None):
     """在场景解析期间创建全局网格，让首次碰撞过滤包含地图。"""
-    from pxr import UsdGeom, UsdPhysics
+    from pxr import Gf, UsdGeom, UsdPhysics
 
     stage = SimulationContext.instance().stage
     mesh = UsdGeom.Mesh.Define(stage, prim_path)
+    # 显式创建标准变换顺序，兼容新版 Isaac Lab 的 XformPrimView 校验。
+    xform = UsdGeom.Xformable(mesh.GetPrim())
+    position = (0.0, 0.0, 0.0) if translation is None else translation
+    rotation = (1.0, 0.0, 0.0, 0.0) if orientation is None else orientation
+    xform.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*position))
+    xform.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(
+        Gf.Quatd(rotation[0], Gf.Vec3d(*rotation[1:]))
+    )
+    xform.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(1.0, 1.0, 1.0))
     mesh.CreatePointsAttr(cfg.vertices.tolist())
     mesh.CreateFaceVertexCountsAttr([3] * len(cfg.faces))
     mesh.CreateFaceVertexIndicesAttr(cfg.faces.reshape(-1).tolist())

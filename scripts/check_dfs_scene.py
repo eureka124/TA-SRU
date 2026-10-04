@@ -16,6 +16,8 @@ def main() -> None:
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     app = AppLauncher(args).app
+    from pxr import Gf, UsdGeom
+
     from ta_sru.config import EnvConfig
     from ta_sru.envs import NavigationEnv, make_isaac_env_cfg
 
@@ -31,6 +33,14 @@ def main() -> None:
             toa_cache_dir=None,
         )
         env = NavigationEnv(make_isaac_env_cfg(config, args.device), config)
+        # 老版允许空变换栈；显式覆盖新版场景视图要求，避免漏掉兼容问题。
+        map_xform = UsdGeom.Xformable(env.sim.stage.GetPrimAtPath("/World/DfsMaps"))
+        assert [str(op.GetOpName()) for op in map_xform.GetOrderedXformOps()] == [
+            "xformOp:translate",
+            "xformOp:orient",
+            "xformOp:scale",
+        ]
+        assert map_xform.GetLocalTransformation() == Gf.Matrix4d(1.0)
         obs, _ = env.reset()
         assert torch.isfinite(obs["policy"]["critic_toa"]).all()
         assert torch.all(env.episode_start_toa > 0)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import signal
@@ -12,18 +13,22 @@ import subprocess
 import sys
 import traceback
 from dataclasses import asdict
-from datetime import datetime, timezone
 from pathlib import Path
 
-# Isaac Lab 2.3.2 需要先加载 Conda 环境中的新版 Warp。
-import torch
-import warp  # noqa: F401
-from isaaclab.app import AppLauncher
+from training_logging import (
+    RUN_DIRECTORY_ENV,
+    record_failure,
+    run_child,
+    supervise,
+    write_status,
+)
 
 RECURRENT_TYPES = ("sru-lstm", "sru-gru", "sru-lstm-gate", "lstm")
 
 
 def parse_args() -> argparse.Namespace:
+    from isaaclab.app import AppLauncher
+
     parser = argparse.ArgumentParser(description="训练 Hummingbird 迷宫导航策略")
     parser.add_argument("--algorithm", choices=("ppo", "recurrent_ppo"), default=None)
     parser.add_argument("--num-envs", type=int, default=4)
@@ -186,6 +191,11 @@ def _raise_keyboard_interrupt(_signal_number: int, _frame: object) -> None:
 
 
 def main() -> None:
+    # 日志监控已启动，依赖导入失败也会留下完整异常。
+    import torch
+    import warp  # noqa: F401
+    from isaaclab.app import AppLauncher
+
     args = parse_args()
     from ta_sru.evaluation import require_dfs_checkpoint
     from ta_sru.scene_config import training_env_config
@@ -218,18 +228,18 @@ def main() -> None:
     commit_id, diff_content = _capture_source_state(
         repository_root, args.commit_id, args.diff_file
     )
-    simulation_app = AppLauncher(args).app
-
-    # 依赖 omni/PhysX 的模块只能在 AppLauncher 之后导入。
-    from ta_sru.algorithms import RecurrentPPO
-    from ta_sru.config import NetworkConfig, PPOConfig, TrainConfig
-    from ta_sru.envs import IsaacLabWrapper, NavigationEnv, make_isaac_env_cfg
-
+    simulation_app = None
     env = None
+    agent = None
+    log_dir = Path(os.environ[RUN_DIRECTORY_ENV])
+    run_name = log_dir.name
     try:
-        timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
-        run_name = f"{'ppo' if algorithm == 'ppo' else args.recurrent_type}_{args.run_name or timestamp}"
-        log_dir = Path(args.log_dir) / run_name
+        simulation_app = AppLauncher(args).app
+        # 依赖 omni/PhysX 的模块只能在 AppLauncher 之后导入。
+        from ta_sru.algorithms import RecurrentPPO
+        from ta_sru.config import NetworkConfig, PPOConfig, TrainConfig
+        from ta_sru.envs import IsaacLabWrapper, NavigationEnv, make_isaac_env_cfg
+
         fields = (
             "seed",
             "maze_seed",
@@ -278,7 +288,6 @@ def main() -> None:
             checkpoint_dir=str(checkpoint_dir),
         )
         config.validate()
-        log_dir.mkdir(parents=True, exist_ok=False)
         (log_dir / "config.json").write_text(
             json.dumps(asdict(config), ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -309,27 +318,59 @@ def main() -> None:
         )
         try:
             agent.learn()
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as error:
+            record_failure(log_dir, error)
             signal.signal(signal.SIGINT, signal.SIG_IGN)
             interrupted_checkpoint = (
                 checkpoint_dir / f"model_interrupted_{agent.timesteps}.pt"
             )
             print(f"\n收到中断，正在保存 checkpoint：{interrupted_checkpoint}")
-            agent.save(interrupted_checkpoint)
-            print("中断 checkpoint 已保存，可以使用 --resume 继续训练。")
+            try:
+                agent.save(interrupted_checkpoint)
+                print("中断 checkpoint 已保存，可以使用 --resume 继续训练。")
+            except Exception:  # noqa: BLE001
+                # 保存或记录失败时保留原始训练异常。
+                traceback.print_exc()
+            raise
         else:
             agent.save(checkpoint_dir / "model_final.pt")
         finally:
             signal.signal(signal.SIGINT, previous_sigint_handler)
-    except Exception:
-        # Isaac Sim 的关闭流程可能结束进程，必须提前输出原始异常。
+    except BaseException as error:
+        # Isaac Sim 的关闭流程可能结束进程，必须提前保存原始异常。
+        record_failure(log_dir, error)
         traceback.print_exc()
         raise
     finally:
-        if env is not None:
-            env.close()
-        simulation_app.close()
+        active_error = sys.exc_info()[0] is not None
+        if agent is not None:
+            try:
+                write_status(log_dir, last_training_step=agent.timesteps)
+            except Exception:  # noqa: BLE001
+                # 保存或记录失败时保留原始训练异常。
+                traceback.print_exc()
+        cleanup_error = None
+        for resource in (env, simulation_app):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except BaseException as error:  # noqa: BLE001
+                # 关闭阶段的异常不能覆盖训练异常，也不能阻止关闭其他资源。
+                traceback.print_exc()
+                if not active_error:
+                    record_failure(log_dir, error)
+                cleanup_error = cleanup_error or error
+        if cleanup_error is not None and not active_error:
+            raise cleanup_error
 
 
 if __name__ == "__main__":
-    main()
+    if RUN_DIRECTORY_ENV in os.environ:
+        # 帮助路径直接退出，不生成训练状态。
+        if not os.environ[RUN_DIRECTORY_ENV]:
+            main()
+        else:
+            sys.exit(run_child(main))
+    else:
+        sys.exit(supervise(Path(__file__).resolve()))

@@ -94,11 +94,9 @@ class EnvConfig:
     goal_reached_weight: float = 300.0
     # 判定无人机到达目标的水平距离阈值，单位为米。
     goal_threshold: float = 0.4
-    # 接触课程开始时用于碰撞判定的力阈值。
-    collision_force_threshold: float = 50.0
-    # 接触课程结束时用于碰撞判定的最小力阈值。
-    minimum_contact_force_threshold: float = 0.1
-    # 接触惩罚及碰撞阈值完成渐变所占的总训练步数比例。
+    # 训练全程固定的碰撞判定力阈值，单位为牛顿。
+    collision_force_threshold: float = 0.1
+    # 接触惩罚完成渐增所占的总训练步数比例。
     contact_penalty_ramp_fraction: float = 0.4
     # 环境课程计算进度时采用的总 transition 数，由 TrainConfig 同步。
     total_training_steps: int = 70_000_000
@@ -140,6 +138,7 @@ class EnvConfig:
             "physics_dt",
             "depth_max_distance",
             "goal_threshold",
+            "collision_force_threshold",
         ):
             value = getattr(self, name)
             if not isfinite(value) or value <= 0:
@@ -176,14 +175,6 @@ class EnvConfig:
             raise ValueError("每个动作下界都必须小于上界")
         if not 0.0 < self.contact_penalty_ramp_fraction <= 1.0:
             raise ValueError("contact_penalty_ramp_fraction 必须位于 (0, 1]")
-        if (
-            not 0.0
-            < self.minimum_contact_force_threshold
-            <= self.collision_force_threshold
-        ):
-            raise ValueError(
-                "minimum_contact_force_threshold 必须为正数且不能大于 collision_force_threshold"
-            )
 
 
 @dataclass

@@ -84,7 +84,17 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(config.map_split, "eval")
         self.assertEqual(config.toa_normalization_max, 125.0)
         self.assertEqual(config.collision_force_threshold, 0.1)
-        self.assertEqual(config.minimum_contact_force_threshold, 0.1)
+        self.assertFalse(hasattr(config, "minimum_contact_force_threshold"))
+
+    def test_evaluation_accepts_old_threshold_curriculum_config(self):
+        original = {
+            "toa_normalization_max": 125.0,
+            "collision_force_threshold": 50.0,
+            "minimum_contact_force_threshold": 0.1,
+        }
+        config = EnvConfig(**configure_evaluation(original))
+        self.assertEqual(config.collision_force_threshold, 0.1)
+        self.assertIn("minimum_contact_force_threshold", original)
 
     def test_outcome_precedence(self):
         self.assertEqual(

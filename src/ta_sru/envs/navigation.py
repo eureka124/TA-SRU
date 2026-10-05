@@ -243,9 +243,6 @@ class NavigationEnv(DirectRLEnv):
         self.previous_toa = torch.full((self.num_envs,), torch.nan, device=self.device)
         self.training_step_offset = 0
         self.training_curriculum_contact_scale = 0.0
-        self.training_curriculum_contact_force_threshold = (
-            self.task.collision_force_threshold
-        )
         self._create_toa_tensors()
         if self.task.debug:
             self._trajectory_history = torch.zeros(
@@ -536,8 +533,8 @@ class NavigationEnv(DirectRLEnv):
         simulated_steps = int(self.common_step_counter * self.num_envs)
         self.training_step_offset = int(elapsed_steps) - simulated_steps
 
-    def _contact_curriculum(self) -> tuple[float, float]:
-        """返回接触惩罚比例及碰撞重置共用的动态接触力阈值。"""
+    def _contact_penalty_scale(self) -> float:
+        """返回接触惩罚渐增比例，碰撞判定阈值始终固定。"""
 
         curriculum = min(
             float(self.training_elapsed_steps)
@@ -546,21 +543,15 @@ class NavigationEnv(DirectRLEnv):
             ),
             1.0,
         )
-        threshold = (
-            self.task.collision_force_threshold * (1.0 - curriculum)
-            + self.task.minimum_contact_force_threshold * curriculum
-        )
         self.training_curriculum_contact_scale = curriculum
-        self.training_curriculum_contact_force_threshold = threshold
-        return curriculum, threshold
+        return curriculum
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         distance = torch.linalg.vector_norm(
             self.goal_positions[:, :2] - self.robot.data.root_pos_w[:, :2], dim=-1
         )
         success = distance <= self.task.goal_threshold
-        _, contact_force_threshold = self._contact_curriculum()
-        collided = self._contact_force() >= contact_force_threshold
+        collided = self._contact_force() >= self.task.collision_force_threshold
         local_xy = self.robot.data.root_pos_w[:, :2] - self.map_origins[:, :2]
         outside = torch.any(torch.abs(local_xy) > self.task.arena_half_extent, dim=-1)
         time_out = self.episode_length_buf >= self.max_episode_length - 1
@@ -615,10 +606,10 @@ class NavigationEnv(DirectRLEnv):
         # 起点为本回合固定分母；无效采样切断差分历史，成功时不补发剩余进度。
         self.previous_toa.copy_(current_toa.detach())
 
-        curriculum, contact_force_threshold = self._contact_curriculum()
-        contact_penalty = (self._contact_force() / contact_force_threshold).clamp(
-            max=1.0
-        ) * curriculum
+        curriculum = self._contact_penalty_scale()
+        contact_penalty = (
+            self._contact_force() / self.task.collision_force_threshold
+        ).clamp(max=1.0) * curriculum
         success = self.extras["success"].float()
         return (
             self.task.goal_velocity_weight * goal_velocity

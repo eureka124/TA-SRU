@@ -181,6 +181,23 @@ class DfsTests(unittest.TestCase):
             0.1,
         )
 
+    def test_resume_ignores_removed_threshold_curriculum_field(self):
+        saved = asdict(self.config(collision_force_threshold=12.0))
+        saved["minimum_contact_force_threshold"] = 0.1
+        restored = training_env_config(saved, {})
+        self.assertEqual(restored.collision_force_threshold, 0.1)
+        self.assertNotIn("minimum_contact_force_threshold", asdict(restored))
+        self.assertIn("minimum_contact_force_threshold", saved)
+        validate_resume_config(saved, restored)
+
+    def test_fixed_collision_threshold_requires_finite_positive_force(self):
+        for threshold in (0.0, -1.0, float("inf"), float("nan")):
+            with (
+                self.subTest(threshold=threshold),
+                self.assertRaisesRegex(ValueError, "collision_force_threshold"),
+            ):
+                self.config(collision_force_threshold=threshold).validate()
+
     def test_single_env_can_finish_all_quotas_and_resume_rejects_changes(self):
         names = [f"eval_{i}" for i in range(16)]
         scheduler = MapQuotaScheduler(16, 3)

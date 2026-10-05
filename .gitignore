@@ -73,3 +73,4 @@ analysis/
 !tests/test_dfs.py
 .cache/
 !scripts/check_dfs_scene.py
+!tests/test_training_logging.py

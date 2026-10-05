@@ -73,7 +73,6 @@ def main() -> None:
 
         # 轻微穿入外墙内表面，确认过滤后仍能与共享地图接触。
         env.task.collision_force_threshold = 0.1
-        env.task.minimum_contact_force_threshold = 0.1
         wall_pose = env.robot.data.root_state_w[0:1, :7].clone()
         wall_pose[:, :2] = env.map_origins[0:1, :2]
         wall_pose[:, 1] -= config.arena_half_extent - config.maze_cell_size - 0.05

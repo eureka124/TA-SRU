@@ -324,6 +324,10 @@ class AlgorithmTests(unittest.TestCase):
                 }.issubset(scalar_tags)
             )
             self.assertEqual(len(accumulator.Scalars("progress/update")), 1)
+            self.assertAlmostEqual(
+                accumulator.Scalars("progress/contact_force_threshold")[0].value,
+                config.env.collision_force_threshold,
+            )
 
 
 if __name__ == "__main__":

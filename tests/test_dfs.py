@@ -4,6 +4,7 @@ import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -18,6 +19,7 @@ from ta_sru.envs.maze import (
     pool_origins,
 )
 from ta_sru.envs.toa import (
+    ToaBank,
     build_toa_bank,
     build_toa_map,
     components,
@@ -105,6 +107,10 @@ class DfsTests(unittest.TestCase):
                     + 1e-5,
                     config.min_start_goal_distance,
                 )
+                cells = np.floor(
+                    (start + config.arena_half_extent) / config.maze_cell_size
+                ).astype(int)
+                self.assertTrue(np.any((cells == 1) | (cells == config.maze_size - 2)))
                 same = bank.sample(replace(config, num_envs=12), 0, episode)
                 np.testing.assert_array_equal(start, same[2])
                 values, valid = sample_toa(
@@ -124,6 +130,62 @@ class DfsTests(unittest.TestCase):
             self.assertGreater(len(list(Path(folder).glob("*.npz"))), count)
             evaluated = build_toa_bank(replace(config, map_split="eval"))
             self.assertEqual(bank.manifest, evaluated.manifest)
+            for pool_config, pool in (
+                (config, bank),
+                (replace(config, map_split="eval"), evaluated),
+            ):
+                for mid, choices in enumerate(pool.starts):
+                    xy = np.linspace(
+                        -config.arena_half_extent,
+                        config.arena_half_extent,
+                        config.toa_grid_size,
+                    )[choices[:, ::-1]]
+                    cells = np.floor(
+                        (xy + config.arena_half_extent) / config.maze_cell_size
+                    ).astype(int)
+                    self.assertTrue(
+                        np.any(
+                            (cells == 1) | (cells == config.maze_size - 2), axis=1
+                        ).all()
+                    )
+                    for episode in range(30):
+                        _, gid, start, t0 = pool.sample(pool_config, 3, episode, mid)
+                        self.assertGreaterEqual(
+                            np.linalg.norm(
+                                start - pool.goals[mid * config.goals_per_map + gid]
+                            ),
+                            8.0,
+                        )
+                        self.assertTrue(np.isfinite(t0) and t0 > 0)
+
+    def test_start_is_fixed_while_near_and_unreachable_goals_are_rejected(self):
+        config = self.config(goals_per_map=3)
+        starts = np.array([[15, 15]], dtype=np.int32)
+        values = np.full(
+            (3, config.toa_grid_size, config.toa_grid_size), np.inf, dtype=np.float32
+        )
+        values[0, 15, 15] = 1.0
+        values[2, 15, 15] = 12.0
+        bank = ToaBank(
+            [generate_maze(config, 42)],
+            np.array([[-3.0, -4.0], [4.0, 4.0], [4.0, -4.0]], dtype=np.float32),
+            values,
+            [starts],
+            {},
+        )
+        with patch("ta_sru.envs.toa.np.random.default_rng") as create_rng:
+            rng = create_rng.return_value
+            rng.integers.return_value = 0
+            rng.permutation.return_value = np.array([0, 1, 2])
+            mid, gid, start, t0 = bank.sample(config, 0, 0, map_id=0)
+            self.assertEqual((mid, gid, t0), (0, 2, 12.0))
+            np.testing.assert_array_equal(start, [-4.0, -4.0])
+            # 距离恰好 8 m 可接受；近目标和不可达目标不会触发重新采样起点。
+            rng.integers.assert_called_once_with(1)
+
+    def test_impossible_outer_start_distance_reports_error(self):
+        with self.assertRaisesRegex(ValueError, "最外围.*至少 100 m"):
+            build_toa_bank(self.config(min_start_goal_distance=100.0))
 
     def test_toa_routes_around_wall_and_unwritable_cache_falls_back(self):
         config = self.config(toa_slow_speed=1)

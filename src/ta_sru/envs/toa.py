@@ -78,22 +78,41 @@ def components(free: np.ndarray) -> np.ndarray:
     return labels
 
 
+def start_candidates(config: EnvConfig, clearance: np.ndarray) -> np.ndarray:
+    """只保留边界墙内侧第一圈格子中满足出生余量的 TOA 栅格点。"""
+    candidates = np.argwhere(clearance > config.spawn_margin)
+    cells = np.floor(
+        (coordinates(config)[candidates] + config.arena_half_extent)
+        / config.maze_cell_size
+    ).astype(np.int32)
+    outer_ring = np.any((cells == 1) | (cells == config.maze_size - 2), axis=1)
+    return candidates[outer_ring]
+
+
 def sample_goals(
     config: EnvConfig, maze: MazeDefinition, clearance: np.ndarray, labels: np.ndarray
 ) -> np.ndarray:
     candidates = np.argwhere(clearance > config.spawn_margin)
+    starts = start_candidates(config, clearance)
+    if not len(starts):
+        raise ValueError(f"{maze.name} 最外围一圈格子没有满足出生余量的起点")
     rng = np.random.default_rng(np.random.SeedSequence([maze.seed, 1701]))
     order = rng.permutation(len(candidates))
     goals = []
+    coords = coordinates(config)
+    starts_xy = coords[starts[:, ::-1]]
     for index in order:
         goal = candidates[index]
-        same = labels[candidates[:, 0], candidates[:, 1]] == labels[tuple(goal)]
-        distance = np.linalg.norm((candidates - goal) * config.toa_spacing, axis=1)
+        same = labels[starts[:, 0], starts[:, 1]] == labels[tuple(goal)]
+        distance = np.linalg.norm(starts_xy - coords[goal[::-1]], axis=1)
         if np.any(same & (distance >= config.min_start_goal_distance)):
             goals.append(goal)
             if len(goals) == config.goals_per_map:
                 return np.asarray(goals, dtype=np.int32)
-    raise ValueError(f"{maze.name} 无法采样足够目标及可达起点")
+    raise ValueError(
+        f"{maze.name} 无法采样足够目标：最外围起点到目标的可达直线距离"
+        f"需要至少 {config.min_start_goal_distance:g} m"
+    )
 
 
 def cache_key(config: EnvConfig, maze: MazeDefinition, goal: np.ndarray) -> str:
@@ -205,6 +224,7 @@ class ToaBank:
     maps: list[MazeDefinition]
     goals: np.ndarray
     values: np.ndarray
+    # 每张地图一个外围起点候选池，不随目标重复存储。
     starts: list[np.ndarray]
     manifest: dict
 
@@ -215,12 +235,23 @@ class ToaBank:
             np.random.SeedSequence([config.seed, 2309, env_id, episode_id])
         )
         map_id = int(rng.integers(len(self.maps))) if map_id is None else map_id
-        goal_id = int(rng.integers(config.goals_per_map))
-        bank_id = map_id * config.goals_per_map + goal_id
-        choices = self.starts[bank_id]
+        choices = self.starts[map_id]
         row, col = choices[int(rng.integers(len(choices)))]
         xy = coordinates(config)[[col, row]]
-        return map_id, goal_id, xy, float(self.values[bank_id, row, col])
+        # 随机排列等价于不断拒绝不合格目标，且最多检查一遍缓存目标池。
+        for goal_id in rng.permutation(config.goals_per_map):
+            bank_id = map_id * config.goals_per_map + int(goal_id)
+            distance = np.linalg.norm(self.goals[bank_id] - xy)
+            initial_toa = float(self.values[bank_id, row, col])
+            if (
+                distance >= config.min_start_goal_distance
+                and np.isfinite(initial_toa)
+                and initial_toa > 1e-6
+            ):
+                return map_id, int(goal_id), xy, initial_toa
+        raise ValueError(
+            f"{self.maps[map_id].name} 外围起点没有符合距离和可达性要求的目标"
+        )
 
 
 def build_toa_bank(config: EnvConfig) -> ToaBank:
@@ -244,20 +275,24 @@ def build_toa_bank(config: EnvConfig) -> ToaBank:
             )
             if split != config.map_split:
                 continue
-            candidates = np.argwhere(clearance > config.spawn_margin)
+            candidates = start_candidates(config, clearance)
+            eligible_start = np.zeros(len(candidates), dtype=bool)
             for goal in goals:
                 toa, _ = cached_toa(config, maze, clearance, labels, goal)
                 valid = np.isfinite(toa[candidates[:, 0], candidates[:, 1]])
                 valid &= toa[candidates[:, 0], candidates[:, 1]] > 1e-6
                 valid &= (
-                    np.linalg.norm((candidates - goal) * config.toa_spacing, axis=1)
+                    np.linalg.norm(
+                        coords[candidates[:, ::-1]] - coords[goal[::-1]], axis=1
+                    )
                     >= config.min_start_goal_distance
                 )
                 if not valid.any():
                     raise ValueError(f"{maze.name} 目标没有合法起点")
-                starts.append(candidates[valid].astype(np.int32))
+                eligible_start |= valid
                 values.append(toa)
                 goals_xy.append(coords[goal[::-1]])
+            starts.append(candidates[eligible_start].astype(np.int32))
         metadata[split] = records
     manifest = {
         "scene_version": SCENE_VERSION,
@@ -265,6 +300,11 @@ def build_toa_bank(config: EnvConfig) -> ToaBank:
         "toa_version": TOA_VERSION,
         "solver": skfmm.__version__,
         "toa_reward_normalization": "episode_start",
+        "sampling": {
+            "version": "outer-ring-start-first-v1",
+            "start_region": "first_inner_cell_ring",
+            "goal_selection": "reachable_cached_goal_min_euclidean_distance",
+        },
         "pools": metadata,
         "grid_size": config.toa_grid_size,
         "spacing": config.toa_spacing,

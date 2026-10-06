@@ -47,7 +47,8 @@ class EnvConfig:
     drone_radius: float = 0.4
     safety_margin: float = 0.1
     spawn_margin: float = 0.1
-    min_start_goal_distance: float = 4.0
+    # 先采样最外围可通行格子中的起点，再排除水平距离不足此值的目标。
+    min_start_goal_distance: float = 8.0
     # 评估只切换地图池，沿用训练的 Critic 归一化尺度。
     map_split: str = "train"
     evaluation_episodes_per_map: int = 0
@@ -154,15 +155,22 @@ class EnvConfig:
             raise ValueError("随机种子不能为负数")
         if not 0 <= self.maze_wall_removal_probability <= 1:
             raise ValueError("拆墙概率必须位于 [0, 1]")
-        if self.maze_cell_size <= 2 * (self.drone_radius + self.safety_margin + self.spawn_margin):
+        if self.maze_cell_size <= 2 * (
+            self.drone_radius + self.safety_margin + self.spawn_margin
+        ):
             raise ValueError("通道宽度不足以容纳无人机及出生余量")
-        if self.map_split not in ("train", "eval") or self.evaluation_episodes_per_map < 0:
+        if (
+            self.map_split not in ("train", "eval")
+            or self.evaluation_episodes_per_map < 0
+        ):
             raise ValueError("地图池或评估配额不合法")
         if self.toa_crop_size != 16:
             raise ValueError("Critic TOA 输入必须保持 16×16")
         if self.toa_safe_distance <= 0.0 or not 0.0 < self.toa_slow_speed <= 1.0:
             raise ValueError("TOA 安全距离必须为正，慢速比例必须位于 (0, 1]")
-        if self.toa_normalization_max is not None and not (0.0 < self.toa_normalization_max < float("inf")):
+        if self.toa_normalization_max is not None and not (
+            0.0 < self.toa_normalization_max < float("inf")
+        ):
             raise ValueError("toa_normalization_max 必须为有限正数或 None")
         if any(low >= high for low, high in zip(self.action_low, self.action_high)):
             raise ValueError("每个动作下界都必须小于上界")
@@ -281,5 +289,7 @@ class TrainConfig:
         if self.algorithm not in ("ppo", "recurrent_ppo"):
             raise ValueError("algorithm 必须是 ppo 或 recurrent_ppo")
         if (self.algorithm == "ppo") != (self.network.recurrent_type == "none"):
-            raise ValueError("普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元")
+            raise ValueError(
+                "普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元"
+            )
         self.ppo.validate(self.env.num_envs)

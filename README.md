@@ -138,7 +138,7 @@ python scripts/train.py \
 | `--maze-wall-removal-probability` | `0.25` | DFS 后每条剩余内部隔墙的拆除概率。 |
 | `--toa-resolution` | `0.1` | 期望 TOA 米制栅格间距；默认生成 301×301 图。 |
 | `--toa-cache-dir` | `.cache/dfs_toa` | 可复用磁盘缓存，损坏项自动重建；无法写入时仍用内存缓存。 |
-| `--min-start-goal-distance` | `4.0` | 起终点最小水平直线距离，米。 |
+| `--min-start-goal-distance` | `8.0` | 起终点最小水平直线距离，米。 |
 | `--safety-margin` / `--spawn-margin` | `0.1` / `0.1` | 障碍膨胀及额外出生余量，米。 |
 | `--episode-seconds` | `40` | 回合时长，秒；长绕行路径是否适配需通过短检查评估。 |
 | `--toa-normalization-max` | 新训练自动计算 | Critic 的固定 TOA 量程；省略时新训练使用静态地图的可通行最大值，恢复训练沿用 checkpoint。 |
@@ -150,6 +150,8 @@ python scripts/train.py \
 | `--debug` | 关闭 | 显示导航标记并保存全局 TOA 图；训练时不生成评估 episode 回放。 |
 
 显存不足时先降低并行环境数和 batch size，同时检查上述批次约束。完整 rollout 保存在 CPU，但内存需求仍随环境数和 rollout 长度增加。
+
+每回合先在边界墙内侧最外围一圈可通行格子中采样起点，再从缓存目标池中随机选择可达目标；水平直线距离不足 8 m 的目标会被拒绝。起点满足障碍膨胀和出生余量要求，候选池仅包含至少有一个合格目标的起点。若地图或目标池无法满足条件，启动时报错。
 
 ### 错误日志与退出状态
 
@@ -185,6 +187,8 @@ python scripts/train.py \
 **环境配置完整继承 checkpoint**。CLI 缺省值不会覆盖已保存地图参数；显式更改地图、目标、TOA 或奖励定义会报错。运行设备、环境数、日志位置及缓存路径可以调整。PPO 批次参数仍由本次命令配置；`--total-timesteps` 是包含已训练步数的总目标。恢复会创建新的运行目录。
 
 checkpoint 保存场景/生成器/TOA 版本、两个地图池及目标摘要和训练 TOA 观测量程。恢复时重新生成并核验，拒绝旧布局 checkpoint；恢复会开启新回合，不保证从中断的物理状态逐帧续演。
+
+场景摘要包含起终点采样规则；采用全图起点采样的旧 checkpoint 无法直接恢复到外围起点采样规则下。
 
 ### 训练课程与指标
 

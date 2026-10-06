@@ -29,11 +29,11 @@ class EnvConfig:
     # 调试文件的保存目录；为 None 时使用默认的 debug 目录。
     debug_output_dir: str | None = None
     # 单次物理仿真的时间步长，单位为秒。
-    physics_dt: float = 1.0 / 120.0
+    physics_dt: float = 1.0 / 128.0
     # 每次策略决策之间执行的物理仿真步数。
-    control_decimation: int = 5
+    control_decimation: int = 32
     # 单个回合允许持续的仿真时长，单位为秒。
-    episode_seconds: float = 40.0
+    episode_seconds: float = 80.0
 
     # 地图、目标和回合采样使用独立随机流。
     maze_seed: int = 123
@@ -155,22 +155,15 @@ class EnvConfig:
             raise ValueError("随机种子不能为负数")
         if not 0 <= self.maze_wall_removal_probability <= 1:
             raise ValueError("拆墙概率必须位于 [0, 1]")
-        if self.maze_cell_size <= 2 * (
-            self.drone_radius + self.safety_margin + self.spawn_margin
-        ):
+        if self.maze_cell_size <= 2 * (self.drone_radius + self.safety_margin + self.spawn_margin):
             raise ValueError("通道宽度不足以容纳无人机及出生余量")
-        if (
-            self.map_split not in ("train", "eval")
-            or self.evaluation_episodes_per_map < 0
-        ):
+        if self.map_split not in ("train", "eval") or self.evaluation_episodes_per_map < 0:
             raise ValueError("地图池或评估配额不合法")
         if self.toa_crop_size != 16:
             raise ValueError("Critic TOA 输入必须保持 16×16")
         if self.toa_safe_distance <= 0.0 or not 0.0 < self.toa_slow_speed <= 1.0:
             raise ValueError("TOA 安全距离必须为正，慢速比例必须位于 (0, 1]")
-        if self.toa_normalization_max is not None and not (
-            0.0 < self.toa_normalization_max < float("inf")
-        ):
+        if self.toa_normalization_max is not None and not (0.0 < self.toa_normalization_max < float("inf")):
             raise ValueError("toa_normalization_max 必须为有限正数或 None")
         if any(low >= high for low, high in zip(self.action_low, self.action_high)):
             raise ValueError("每个动作下界都必须小于上界")
@@ -223,7 +216,7 @@ class PPOConfig:
     # 对同一批 rollout 数据重复优化的轮数。
     epochs: int = 5
     # 未来回报的折扣因子。
-    gamma: float = 0.99
+    gamma: float = 0.95
     # 广义优势估计的偏差与方差权衡系数。
     gae_lambda: float = 0.95
     # Adam 优化器的学习率。
@@ -289,7 +282,5 @@ class TrainConfig:
         if self.algorithm not in ("ppo", "recurrent_ppo"):
             raise ValueError("algorithm 必须是 ppo 或 recurrent_ppo")
         if (self.algorithm == "ppo") != (self.network.recurrent_type == "none"):
-            raise ValueError(
-                "普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元"
-            )
+            raise ValueError("普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元")
         self.ppo.validate(self.env.num_envs)

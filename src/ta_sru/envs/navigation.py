@@ -95,8 +95,8 @@ class NavigationSceneCfg(InteractiveSceneCfg):
         pattern_cfg=patterns.PinholeCameraPatternCfg(
             focal_length=10.4775,
             horizontal_aperture=20.955,
-            height=48,
-            width=64,
+            height=192,
+            width=256,
         ),
         offset=MultiMeshRayCasterCameraCfg.OffsetCfg(
             pos=(0.0, 0.0, -1.0),

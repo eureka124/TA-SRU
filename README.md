@@ -387,7 +387,7 @@ python scripts/play.py runs/<运行名>/checkpoints/model_best.pt \
 | 文件 | 如何使用 |
 | --- | --- |
 | `index.html` | 浏览器直接打开，查看同步回放。 |
-| `depth.mp4` | 灰度深度视频；默认原始分辨率为 64×48，保留相机分辨率，按策略频率采样。 |
+| `depth.mp4` | 灰度深度视频；默认原始分辨率为 256×192，保留相机分辨率，按策略频率采样。 |
 | `depth_raw.npz` | 原始米制浮点深度（保留 NaN/Inf）、时间、动作和状态，可用 NumPy 读取。 |
 | `telemetry.json` | 本回合布局、结局、障碍物几何及逐步动作/状态/位置数据。 |
 

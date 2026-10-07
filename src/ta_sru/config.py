@@ -55,9 +55,9 @@ class EnvConfig:
     toa_cache_dir: str | None = ".cache/dfs_toa"
 
     # 输入网络的下采样深度图高度，单位为像素。
-    depth_height: int = 12
+    depth_height: int = 48
     # 输入网络的下采样深度图宽度，单位为像素。
-    depth_width: int = 16
+    depth_width: int = 64
     # 深度观测的截断和归一化上限，单位为米。
     depth_max_distance: float = 10.0
     # 深度相机的水平视场角，单位为弧度。
@@ -176,7 +176,7 @@ class NetworkConfig:
     """非对称 Actor–Critic 网络配置。"""
 
     # Actor 与 Critic 各观测编码器输出的特征维度。
-    feature_dim: int = 192
+    feature_dim: int = 512
     # Actor 与 Critic 使用的循环单元类型。
     recurrent_type: str = "sru-lstm"
     # 每层循环单元的隐藏状态维度。

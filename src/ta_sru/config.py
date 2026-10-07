@@ -41,7 +41,7 @@ class EnvConfig:
     eval_map_count: int = 16
     goals_per_map: int = 8
     maze_size: int = 15
-    maze_cell_size: float = 2.0
+    maze_cell_size: float = 4.0
     maze_wall_removal_probability: float = 0.25
     arena_height: float = 4.0
     drone_radius: float = 0.4

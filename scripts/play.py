@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--steps", type=int, default=None, help="可选的提前停止步数上限"
     )
-    parser.add_argument("--episodes-per-map", type=int, default=1000)
+    parser.add_argument("--episodes-per-map", type=int, default=100)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--network-device", default=None)
     parser.add_argument(

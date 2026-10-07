@@ -60,7 +60,9 @@ class PlayDebugRecorder:
         self.selection_range: tuple[int, int] | None = None
         if episodes_per_map is not None:
             count = min(max_episodes_per_map, episodes_per_map)
-            first = (episodes_per_map - count) // 2 + 1
+            # 提前选取第 50 回合附近；评估不足 100 回合时仍取中间区间。
+            window = min(episodes_per_map, 100)
+            first = max(1, (window - count) // 2 + 1)
             self.selection_range = (first, first + count - 1)
         self.map_starts: dict[str, int] = {}
         self.running_envs: set[int] = set()

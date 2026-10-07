@@ -38,9 +38,7 @@ def require_supported_action_transform(value: str | None) -> None:
             "物理量纲的动作，两者权重含义不同，不能加载。请改用 main 分支评估，"
             "或在当前分支重新训练。"
         )
-    raise ValueError(
-        f"checkpoint 的动作参数化为 {value!r}，与当前 {ACTION_TRANSFORM!r} 不一致"
-    )
+    raise ValueError(f"checkpoint 的动作参数化为 {value!r}，与当前 {ACTION_TRANSFORM!r} 不一致")
 
 
 @dataclass
@@ -96,13 +94,11 @@ class ActorEncoder(nn.Module):
 
     def __init__(self, robot_state_size: int, feature_size: int) -> None:
         super().__init__()
-        self.depth = ImageEncoder((8, 16, 32), feature_size)
+        self.depth = ImageEncoder((8, 16, 32, 64), feature_size)
         self.robot_state = nn.Linear(robot_state_size, feature_size)
 
     def forward(self, observation: Observation) -> torch.Tensor:
-        return self.depth(observation["camera"]) + self.robot_state(
-            observation["robot_state"].float()
-        )
+        return self.depth(observation["camera"]) + self.robot_state(observation["robot_state"].float())
 
 
 class CriticEncoder(nn.Module):
@@ -110,16 +106,12 @@ class CriticEncoder(nn.Module):
 
     def __init__(self, robot_state_size: int, feature_size: int) -> None:
         super().__init__()
-        self.depth = ImageEncoder((8, 16, 32), feature_size)
+        self.depth = ImageEncoder((8, 16, 32, 64), feature_size)
         self.robot_state = nn.Linear(robot_state_size, feature_size)
         self.toa = ImageEncoder((8, 16, 32), feature_size)
 
     def forward(self, observation: Observation) -> torch.Tensor:
-        return (
-            self.depth(observation["camera"])
-            + self.robot_state(observation["robot_state"].float())
-            + self.toa(observation["critic_toa"])
-        )
+        return self.depth(observation["camera"]) + self.robot_state(observation["robot_state"].float()) + self.toa(observation["critic_toa"])
 
 
 class AsymmetricRecurrentActorCritic(nn.Module):
@@ -131,9 +123,7 @@ class AsymmetricRecurrentActorCritic(nn.Module):
     def __init__(self, config: NetworkConfig) -> None:
         super().__init__()
         if config.share_depth_encoder:
-            raise NotImplementedError(
-                "share_depth_encoder 是未来实验入口；当前版本按要求不实现特征共享"
-            )
+            raise NotImplementedError("share_depth_encoder 是未来实验入口；当前版本按要求不实现特征共享")
         config.validate()
         self.config = config
         self.actor_encoder = ActorEncoder(self.robot_state_size, config.feature_dim)
@@ -150,34 +140,21 @@ class AsymmetricRecurrentActorCritic(nn.Module):
             config.recurrent_hidden_size,
             config.recurrent_layers,
         )
-        latent_size = (
-            config.feature_dim
-            if config.recurrent_type == "none"
-            else config.recurrent_hidden_size
-        )
+        latent_size = config.feature_dim if config.recurrent_type == "none" else config.recurrent_hidden_size
         self.actor_mlp, actor_output_size = _mlp(latent_size, config.actor_hidden_sizes)
-        self.critic_mlp, critic_output_size = _mlp(
-            latent_size, config.critic_hidden_sizes
-        )
+        self.critic_mlp, critic_output_size = _mlp(latent_size, config.critic_hidden_sizes)
         self.action_mean = nn.Linear(actor_output_size, self.action_size)
         self.value_head = nn.Linear(critic_output_size, 1)
-        self.log_std = nn.Parameter(
-            torch.full((self.action_size,), config.initial_log_std)
-        )
+        self.log_std = nn.Parameter(torch.full((self.action_size,), config.initial_log_std))
         self._initialize_weights()
 
     def _initialize_weights(self) -> None:
         """使用 PPO 常见的正交初始化；循环单元保留自身初始化。"""
 
         recurrent_modules = {id(module) for module in self.actor_recurrent.modules()}
-        recurrent_modules.update(
-            id(module) for module in self.critic_recurrent.modules()
-        )
+        recurrent_modules.update(id(module) for module in self.critic_recurrent.modules())
         for module in self.modules():
-            if (
-                isinstance(module, (nn.Linear, nn.Conv2d))
-                and id(module) not in recurrent_modules
-            ):
+            if isinstance(module, (nn.Linear, nn.Conv2d)) and id(module) not in recurrent_modules:
                 nn.init.orthogonal_(module.weight, gain=2.0**0.5)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
@@ -212,9 +189,7 @@ class AsymmetricRecurrentActorCritic(nn.Module):
         """确定性评估仅计算 Actor，不读取 Critic 的特权观测。"""
         sequence = self._with_time_dimension(observation)
         features = self.actor_encoder(sequence)
-        output, actor_state = self.actor_recurrent(
-            features, state.actor, episode_starts.unsqueeze(0)
-        )
+        output, actor_state = self.actor_recurrent(features, state.actor, episode_starts.unsqueeze(0))
         action = self.action_mean(self.actor_mlp(output[0]))
         return action, RecurrentState(actor_state, state.critic)
 
@@ -232,12 +207,8 @@ class AsymmetricRecurrentActorCritic(nn.Module):
         starts = episode_starts.unsqueeze(0)
         actor_features = self.actor_encoder(sequence)
         critic_features = self.critic_encoder(sequence)
-        actor_output, actor_state = self.actor_recurrent(
-            actor_features, state.actor, starts
-        )
-        critic_output, critic_state = self.critic_recurrent(
-            critic_features, state.critic, starts
-        )
+        actor_output, actor_state = self.actor_recurrent(actor_features, state.actor, starts)
+        critic_output, critic_state = self.critic_recurrent(critic_features, state.critic, starts)
         distribution = self._distribution(actor_output[0])
         action = distribution.mean if deterministic else distribution.sample()
         log_probability = distribution.log_prob(action).sum(dim=-1)
@@ -255,12 +226,8 @@ class AsymmetricRecurrentActorCritic(nn.Module):
 
         actor_features = self.actor_encoder(observation)
         critic_features = self.critic_encoder(observation)
-        actor_output, _ = self.actor_recurrent(
-            actor_features, state.actor, episode_starts
-        )
-        critic_output, _ = self.critic_recurrent(
-            critic_features, state.critic, episode_starts
-        )
+        actor_output, _ = self.actor_recurrent(actor_features, state.actor, episode_starts)
+        critic_output, _ = self.critic_recurrent(critic_features, state.critic, episode_starts)
         distribution = self._distribution(actor_output)
         log_probability = distribution.log_prob(action).sum(dim=-1)
         entropy = distribution.entropy().sum(dim=-1)
@@ -276,7 +243,5 @@ class AsymmetricRecurrentActorCritic(nn.Module):
     ) -> torch.Tensor:
         sequence = self._with_time_dimension(observation)
         features = self.critic_encoder(sequence)
-        output, _ = self.critic_recurrent(
-            features, critic_state, episode_starts.unsqueeze(0)
-        )
+        output, _ = self.critic_recurrent(features, critic_state, episode_starts.unsqueeze(0))
         return self.value_head(self.critic_mlp(output[0])).squeeze(-1)

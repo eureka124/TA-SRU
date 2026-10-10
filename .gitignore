@@ -67,6 +67,7 @@ records/
 runs/
 .ruff_cache/
 analysis/
+debug/
 
 # DFS 验证入口与测试需要纳入版本控制。
 !tests/test_core.py

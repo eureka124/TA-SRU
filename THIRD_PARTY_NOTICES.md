@@ -2,10 +2,14 @@
 
 `src/ta_sru/models/lee_controller.py` 与 `recurrent.py` 分别依据旧工程中实际使用的
 OmniDrones Lee controller，以及修改版 sb3-contrib 的 SRU-LSTM、SRU-GRU 和
-SRU-LSTM-GATE 重构。原文件均声明 MIT License；版权声明如下：
+SRU-LSTM-GATE 重构。`src/ta_sru/models/depth_encoder.py` 依据 SRU 参考工程的
+`mdp/depth_utils/depth_noise_encoder.py` 与 `sru-depth-pretraining/network/encoder.py`
+复刻，`assets/depth_encoder/vae_pretrain_new.pth` 是该工程发布的预训练权重。原文件
+均声明 MIT License；版权声明如下：
 
 - OmniDrones controller: Copyright (c) 2023 Botian Xu, Tsinghua University.
 - SRU variants: Copyright (c) 2025 Fan Yang, Robotic Systems Lab, ETH Zurich.
+- Depth encoder and pretrained weights: Copyright (c) 2025 Fan Yang, Robotic Systems Lab, ETH Zurich.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
 associated documentation files (the "Software"), to deal in the Software without restriction,

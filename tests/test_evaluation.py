@@ -23,7 +23,7 @@ class EvaluationTests(unittest.TestCase):
             with self.subTest(recurrent_type=recurrent_type):
                 config = NetworkConfig(
                     recurrent_type=recurrent_type,
-                    feature_dim=16,
+                    feature_dim=256,
                     recurrent_hidden_size=8,
                     actor_hidden_sizes=(8,),
                     critic_hidden_sizes=(8,),

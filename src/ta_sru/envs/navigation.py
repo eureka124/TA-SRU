@@ -11,7 +11,6 @@ import gymnasium as gym
 import isaaclab.sim as sim_utils
 import numpy as np
 import torch
-import torch.nn.functional as F
 from isaaclab.assets import Articulation, AssetBaseCfg
 from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
@@ -28,6 +27,12 @@ from isaaclab.utils import configclass
 
 from ta_sru.config import EnvConfig
 from ta_sru.envs.contact import peak_contact_force
+from ta_sru.envs.depth import (
+    DEPTH_DOWNSAMPLE,
+    downsample_depth,
+    mask_invalid_depth,
+    sanitize_depth,
+)
 from ta_sru.envs.maze import pool_mesh, pool_origins
 from ta_sru.envs.toa import (
     build_toa_bank,
@@ -126,9 +131,10 @@ class IsaacNavigationEnvCfg(DirectRLEnvCfg):
         high=np.asarray((2.0, 0.5, np.pi / 3), dtype=np.float32),
         dtype=np.float32,
     )
-    # Isaac Lab 的 configclass 会复制实例配置，此字典不是共享运行状态。
+    # 占位值；make_isaac_env_cfg 会按 EnvConfig 重新填写，这里的默认值只为让
+    # 直接构造的测试配置也能通过校验。
     observation_space = {  # noqa: RUF012
-        "camera": gym.spaces.Box(-1.0, 1.0, (1, 12, 16), dtype=np.float32),
+        "camera": gym.spaces.Box(0.0, 10.0, (1, 48, 64), dtype=np.float32),
         "robot_state": gym.spaces.Box(-np.inf, np.inf, (8,), dtype=np.float32),
         "critic_toa": gym.spaces.Box(-1.0, 1.0, (1, 16, 16), dtype=np.float32),
     }
@@ -166,16 +172,21 @@ def make_isaac_env_cfg(task: EnvConfig, sim_device: str) -> IsaacNavigationEnvCf
         dtype=np.float32,
     )
     cfg.observation_space = {
+        # 编码器输入是米制深度，0 表示无效，因此上界就是量程上限。
         "camera": gym.spaces.Box(
-            -1.0, 1.0, (1, task.depth_height, task.depth_width), dtype=np.float32
+            0.0,
+            task.depth_max_distance,
+            (1, task.depth_height, task.depth_width),
+            dtype=np.float32,
         ),
         "robot_state": gym.spaces.Box(-np.inf, np.inf, (8,), dtype=np.float32),
         "critic_toa": gym.spaces.Box(
             -1.0, 1.0, (1, task.toa_crop_size, task.toa_crop_size), dtype=np.float32
         ),
     }
-    cfg.scene.camera.pattern_cfg.height = task.depth_height * 4
-    cfg.scene.camera.pattern_cfg.width = task.depth_width * 4
+    # 相机按网络输入的分辨率乘以池化倍数配置，两处必须用同一个常量。
+    cfg.scene.camera.pattern_cfg.height = task.depth_height * DEPTH_DOWNSAMPLE
+    cfg.scene.camera.pattern_cfg.width = task.depth_width * DEPTH_DOWNSAMPLE
     cfg.scene.camera.update_period = task.policy_dt
     cfg.scene.camera.max_distance = task.depth_max_distance
     # 地图池按场地范围加相机截断间距平铺，环境间距必须与 pool_origins 保持一致。
@@ -442,19 +453,21 @@ class NavigationEnv(DirectRLEnv):
         )
 
     def _depth_observation(self) -> torch.Tensor:
+        """相机读数 → 米制深度图，量程外与无效读数置 0。"""
+
         depth = self.camera.data.output["distance_to_image_plane"].clone()
         if depth.ndim == 3:
             depth = depth.unsqueeze(-1)
         depth = depth.permute(0, 3, 1, 2)
-        depth = -F.max_pool2d(-depth, kernel_size=4, stride=4)
-        depth = torch.nan_to_num(
-            depth,
-            nan=self.task.depth_max_distance,
-            posinf=self.task.depth_max_distance,
-            neginf=0.0,
+        depth = sanitize_depth(
+            depth, invalid_distance=self.task.depth_invalid_distance
         )
-        depth = depth.clamp(0.0, self.task.depth_max_distance)
-        return depth / self.task.depth_max_distance * 2.0 - 1.0
+        depth = downsample_depth(depth)
+        return mask_invalid_depth(
+            depth,
+            min_distance=self.task.depth_min_distance,
+            max_distance=self.task.depth_max_distance,
+        )
 
     def _sample_toa(self, points_xy: torch.Tensor) -> torch.Tensor:
         values, _ = sample_toa(

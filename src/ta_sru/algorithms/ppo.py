@@ -55,8 +55,12 @@ class RecurrentPPO:
         np.random.seed(config.env.seed)
         self.rng = np.random.default_rng(config.env.seed)
         self.policy = AsymmetricRecurrentActorCritic(config.network).to(self.device)
+        # 冻结的预训练深度编码器不产生梯度，也不该占用优化器状态；显式过滤同时避免
+        # 把"没在训练"误判成"训练中"。
         self.optimizer = torch.optim.Adam(
-            self.policy.parameters(), lr=config.ppo.learning_rate, eps=1.0e-5
+            [p for p in self.policy.parameters() if p.requires_grad],
+            lr=config.ppo.learning_rate,
+            eps=1.0e-5,
         )
 
         self.observation, _ = env.reset()
@@ -515,7 +519,16 @@ class RecurrentPPO:
             raise ValueError(
                 f"checkpoint 算法 {saved_algorithm} 与当前 {self.config.algorithm} 不一致"
             )
-        self.policy.load_state_dict(checkpoint["policy"])
+        try:
+            self.policy.load_state_dict(checkpoint["policy"])
+        except RuntimeError as error:
+            # 旧 checkpoint 的深度编码器是小 CNN，键名与 RegNetX+FPN+VAE 完全不同；
+            # 直接抛 RuntimeError 会淹没在几百行缺键里。
+            raise RuntimeError(
+                f"checkpoint 网络结构与当前代码不一致，无法加载：{path}。"
+                "深度编码器已替换为 RegNetX-400MF+FPN+VAE 均值头，且深度观测由"
+                "[-1, 1] 归一化改为米制深度，旧 checkpoint 不能恢复或评估。"
+            ) from error
         if load_optimizer and "optimizer" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.timesteps = int(checkpoint.get("timesteps", 0))

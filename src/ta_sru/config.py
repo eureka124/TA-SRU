@@ -71,12 +71,16 @@ class EnvConfig:
     evaluation_episodes_per_map: int = 0
     toa_cache_dir: str | None = ".cache/dfs_toa"
 
-    # 输入网络的下采样深度图高度，单位为像素。
+    # 输入网络的下采样深度图高度，单位为像素。编码器输出特征图高度为 ceil(该值/8)。
     depth_height: int = 48
-    # 输入网络的下采样深度图宽度，单位为像素。
+    # 输入网络的下采样深度图宽度，单位为像素。编码器输出特征图宽度为 ceil(该值/8)。
     depth_width: int = 64
-    # 深度观测的截断和归一化上限，单位为米。
+    # 深度观测的有效量程下限，单位为米；更近的读数视为无效并置 0。
+    depth_min_distance: float = 0.25
+    # 深度观测的上限，单位为米；更远的读数视为无效并置 0。
     depth_max_distance: float = 10.0
+    # NaN／无穷等异常读数的替换值，单位为米；必须大于上限才能保证被置 0。
+    depth_invalid_distance: float = 50.0
     # 深度相机的水平视场角，单位为弧度。
     camera_horizontal_fov: float = 1.5707963267948966
 
@@ -167,13 +171,17 @@ class EnvConfig:
             "toa_crop_spacing",
             "toa_safe_distance",
             "physics_dt",
+            "depth_min_distance",
             "depth_max_distance",
+            "depth_invalid_distance",
             "goal_threshold",
             "collision_force_threshold",
         ):
             value = getattr(self, name)
             if not isfinite(value) or value <= 0:
                 raise ValueError(f"{name} 必须为有限正数")
+        if not 0.0 < self.depth_min_distance < self.depth_max_distance < self.depth_invalid_distance:
+            raise ValueError("深度量程必须满足 0 < depth_min_distance < depth_max_distance < depth_invalid_distance")
         for name in ("safety_margin", "spawn_margin", "obstacle_min_separation"):
             if not isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} 必须为有限非负数")
@@ -209,8 +217,12 @@ class EnvConfig:
 class NetworkConfig:
     """非对称 Actor–Critic 网络配置。"""
 
-    # Actor 与 Critic 各观测编码器输出的特征维度。
-    feature_dim: int = 512
+    # Actor 与 Critic 各观测编码器输出的特征维度，必须等于冻结深度编码器的展平输出
+    # depth_feature_size(depth_height, depth_width)：48×64 对应 64×6×8 = 3072。
+    feature_dim: int = 3072
+    # 深度编码器预训练权重路径；为 None 时使用仓库内的
+    # assets/depth_encoder/vae_pretrain_new.pth。
+    depth_encoder_weights: str | None = None
     # Actor 与 Critic 使用的循环单元类型。
     recurrent_type: str = "sru-lstm"
     # 每层循环单元的隐藏状态维度。
@@ -223,8 +235,9 @@ class NetworkConfig:
     critic_hidden_sizes: tuple[int, ...] = (512, 512)
     # 高斯动作分布可训练对数标准差的初始值。
     initial_log_std: float = 0.0
-    # 仅作接口预留：当前实现明确保持 Actor/Critic 深度编码器相互独立。
-    share_depth_encoder: bool = False
+    # Actor 与 Critic 共用同一个冻结的预训练深度编码器。置 False 时各自持有一份，
+    # 但两份权重完全相同且都冻结，仅作为消融开关保留，代价是多占一份显存。
+    share_depth_encoder: bool = True
 
     def validate(self) -> None:
         self.recurrent_type = normalize_recurrent_type(self.recurrent_type)
@@ -313,6 +326,18 @@ class TrainConfig:
         self.env.total_training_steps = self.total_timesteps
         self.env.validate()
         self.network.validate()
+        # 深度编码器输出与 feature_dim 必须对齐，否则循环单元输入宽度和 robot_state
+        # 的投影宽度会与实际特征不符。放在这里校验是因为只有 TrainConfig 同时持有两者。
+        # 局部导入：models 包会反向导入本模块，放在顶层会构成循环导入。
+        from ta_sru.models.depth_encoder import depth_feature_size
+
+        expected = depth_feature_size(self.env.depth_height, self.env.depth_width)
+        if self.network.feature_dim != expected:
+            raise ValueError(
+                f"feature_dim 必须等于深度编码器输出 {expected}"
+                f"（64 × {self.env.depth_height}/8 × {self.env.depth_width}/8）；"
+                f"当前为 {self.network.feature_dim}"
+            )
         if self.algorithm not in ("ppo", "recurrent_ppo"):
             raise ValueError("algorithm 必须是 ppo 或 recurrent_ppo")
         if (self.algorithm == "ppo") != (self.network.recurrent_type == "none"):

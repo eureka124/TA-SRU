@@ -96,7 +96,7 @@ class ModelTests(unittest.TestCase):
         torch.manual_seed(1)
         model = AsymmetricRecurrentActorCritic(
             NetworkConfig(
-                feature_dim=16,
+                feature_dim=256,
                 recurrent_hidden_size=8,
                 actor_hidden_sizes=(8,),
                 critic_hidden_sizes=(8,),
@@ -109,12 +109,19 @@ class ModelTests(unittest.TestCase):
         }
         changed = dict(observation)
         changed["critic_toa"] = observation["critic_toa"] + 10.0
+        state = model.initial_state(2)
+        starts = torch.zeros(2, dtype=torch.bool)
+        # 比较 Actor 的完整前向，比只比较编码器输出更强：深度图不经过 TOA，
+        # 而特权观测一旦泄漏进 Actor 的任何一层都会让动作发生变化。
         torch.testing.assert_close(
-            model.actor_encoder(observation), model.actor_encoder(changed)
+            model.act_actor(observation, state, starts)[0],
+            model.act_actor(changed, state, starts)[0],
         )
+        depth_feature = model.depth_encoder(observation["camera"])
         self.assertFalse(
             torch.allclose(
-                model.critic_encoder(observation), model.critic_encoder(changed)
+                model.critic_encoder(observation, depth_feature),
+                model.critic_encoder(changed, depth_feature),
             )
         )
 
@@ -122,7 +129,7 @@ class ModelTests(unittest.TestCase):
         torch.manual_seed(3)
         model = AsymmetricRecurrentActorCritic(
             NetworkConfig(
-                feature_dim=16,
+                feature_dim=256,
                 recurrent_hidden_size=8,
                 actor_hidden_sizes=(8,),
                 critic_hidden_sizes=(8,),
@@ -211,9 +218,9 @@ class AlgorithmTests(unittest.TestCase):
         for recurrent_type in ("sru-lstm", "sru-gru", "sru-lstm-gate", "lstm"):
             with self.subTest(recurrent_type=recurrent_type):
                 config = TrainConfig(
-                    env=EnvConfig(num_envs=2),
+                    env=EnvConfig(num_envs=2, depth_height=12, depth_width=16),
                     network=NetworkConfig(
-                        feature_dim=16,
+                        feature_dim=256,
                         recurrent_type=recurrent_type,
                         recurrent_hidden_size=8,
                         actor_hidden_sizes=(8,),
@@ -246,9 +253,9 @@ class AlgorithmTests(unittest.TestCase):
     ) -> None:
         with TemporaryDirectory() as directory:
             config = TrainConfig(
-                env=EnvConfig(num_envs=2),
+                env=EnvConfig(num_envs=2, depth_height=12, depth_width=16),
                 network=NetworkConfig(
-                    feature_dim=16,
+                    feature_dim=256,
                     recurrent_hidden_size=8,
                     actor_hidden_sizes=(8,),
                     critic_hidden_sizes=(8,),
@@ -281,9 +288,9 @@ class AlgorithmTests(unittest.TestCase):
     def test_training_log_contains_recurrent_type(self) -> None:
         with TemporaryDirectory() as directory:
             config = TrainConfig(
-                env=EnvConfig(num_envs=2),
+                env=EnvConfig(num_envs=2, depth_height=12, depth_width=16),
                 network=NetworkConfig(
-                    feature_dim=16,
+                    feature_dim=256,
                     recurrent_type="sru-gru",
                     recurrent_hidden_size=8,
                     actor_hidden_sizes=(8,),

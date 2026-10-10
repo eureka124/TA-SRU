@@ -9,17 +9,30 @@ from ta_sru.models.actor_critic import (
     require_supported_action_transform,
 )
 
-ACTOR_PREFIXES = ("actor_encoder.", "actor_recurrent.", "actor_mlp.", "action_mean.")
+# depth_encoder. 是 Actor 与 Critic 共享的冻结编码器；非共享时的
+# critic_depth_encoder. 不会命中这个前缀。
+ACTOR_PREFIXES = (
+    "depth_encoder.",
+    "actor_encoder.",
+    "actor_recurrent.",
+    "actor_mlp.",
+    "action_mean.",
+)
 ENV_KEYS = (
     "depth_height",
     "depth_width",
+    "depth_min_distance",
     "depth_max_distance",
+    "depth_invalid_distance",
     "camera_horizontal_fov",
     "physics_dt",
     "control_decimation",
     "action_low",
     "action_high",
 )
+# 版本 2：深度输入由 [-1, 1] 归一化改为米制深度（0 表示无效），编码器改为
+# RegNetX-400MF + FPN + VAE 均值头。部署侧必须按新语义构造 camera 输入。
+ARTIFACT_VERSION = 2
 
 
 def export_actor(checkpoint_path, output_path):
@@ -35,7 +48,7 @@ def export_actor(checkpoint_path, output_path):
     model.load_state_dict(checkpoint["policy"], strict=True)
     artifact = {
         "format": "ta_sru_actor",
-        "version": 1,
+        "version": ARTIFACT_VERSION,
         "algorithm": algorithm,
         "network": asdict(network),
         "observation": {key: config["env"][key] for key in ENV_KEYS},

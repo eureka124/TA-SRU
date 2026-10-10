@@ -15,6 +15,7 @@ from torch import nn
 from torch.distributions import Normal
 
 from ta_sru.config import NetworkConfig
+from ta_sru.models.depth_encoder import DepthFeatureEncoder
 from ta_sru.models.recurrent import RecurrentStateTuple, build_recurrent
 
 Observation = Mapping[str, torch.Tensor]
@@ -92,17 +93,19 @@ class ImageEncoder(nn.Module):
 
 
 class ActorEncoder(nn.Module):
-    """只编码部署时可获得的观测。"""
+    """只编码部署时可获得的观测。
+
+    深度图由外部传入：它来自 Actor 与 Critic 共享的冻结编码器，只前向一次。
+    """
 
     def __init__(self, robot_state_size: int, feature_size: int) -> None:
         super().__init__()
-        self.depth = ImageEncoder((8, 16, 32), feature_size)
         self.robot_state = nn.Linear(robot_state_size, feature_size)
 
-    def forward(self, observation: Observation) -> torch.Tensor:
-        return self.depth(observation["camera"]) + self.robot_state(
-            observation["robot_state"].float()
-        )
+    def forward(
+        self, observation: Observation, depth_feature: torch.Tensor
+    ) -> torch.Tensor:
+        return depth_feature + self.robot_state(observation["robot_state"].float())
 
 
 class CriticEncoder(nn.Module):
@@ -110,13 +113,14 @@ class CriticEncoder(nn.Module):
 
     def __init__(self, robot_state_size: int, feature_size: int) -> None:
         super().__init__()
-        self.depth = ImageEncoder((8, 16, 32), feature_size)
         self.robot_state = nn.Linear(robot_state_size, feature_size)
         self.toa = ImageEncoder((8, 16, 32), feature_size)
 
-    def forward(self, observation: Observation) -> torch.Tensor:
+    def forward(
+        self, observation: Observation, depth_feature: torch.Tensor
+    ) -> torch.Tensor:
         return (
-            self.depth(observation["camera"])
+            depth_feature
             + self.robot_state(observation["robot_state"].float())
             + self.toa(observation["critic_toa"])
         )
@@ -130,12 +134,16 @@ class AsymmetricRecurrentActorCritic(nn.Module):
 
     def __init__(self, config: NetworkConfig) -> None:
         super().__init__()
-        if config.share_depth_encoder:
-            raise NotImplementedError(
-                "share_depth_encoder 是未来实验入口；当前版本按要求不实现特征共享"
-            )
         config.validate()
         self.config = config
+        # 冻结的预训练深度编码器。共享时 Actor 与 Critic 复用同一份权重，也只在
+        # 前向里跑一次；不共享时两份权重完全相同且都冻结，仅作消融对照。
+        self.depth_encoder = DepthFeatureEncoder(config.depth_encoder_weights)
+        self.critic_depth_encoder = (
+            None if config.share_depth_encoder else DepthFeatureEncoder(
+                config.depth_encoder_weights
+            )
+        )
         self.actor_encoder = ActorEncoder(self.robot_state_size, config.feature_dim)
         self.critic_encoder = CriticEncoder(self.robot_state_size, config.feature_dim)
         self.actor_recurrent = build_recurrent(
@@ -167,16 +175,20 @@ class AsymmetricRecurrentActorCritic(nn.Module):
         self._initialize_weights()
 
     def _initialize_weights(self) -> None:
-        """使用 PPO 常见的正交初始化；循环单元保留自身初始化。"""
+        """使用 PPO 常见的正交初始化；循环单元与预训练编码器保留自身权重。"""
 
-        recurrent_modules = {id(module) for module in self.actor_recurrent.modules()}
-        recurrent_modules.update(
-            id(module) for module in self.critic_recurrent.modules()
-        )
+        # nn.init 直接写 .data，因此 requires_grad=False 挡不住它，必须显式排除，
+        # 否则会把刚加载的预训练权重覆盖成随机值。
+        preserved = {id(module) for module in self.depth_encoder.modules()}
+        for encoder in (self.critic_depth_encoder,):
+            if encoder is not None:
+                preserved.update(id(module) for module in encoder.modules())
+        preserved.update(id(module) for module in self.actor_recurrent.modules())
+        preserved.update(id(module) for module in self.critic_recurrent.modules())
         for module in self.modules():
             if (
                 isinstance(module, (nn.Linear, nn.Conv2d))
-                and id(module) not in recurrent_modules
+                and id(module) not in preserved
             ):
                 nn.init.orthogonal_(module.weight, gain=2.0**0.5)
                 if module.bias is not None:
@@ -198,6 +210,16 @@ class AsymmetricRecurrentActorCritic(nn.Module):
     def _with_time_dimension(observation: Observation) -> dict[str, torch.Tensor]:
         return {key: value.unsqueeze(0) for key, value in observation.items()}
 
+    def _depth_features(
+        self, observation: Observation
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """返回 Actor 与 Critic 各自使用的深度特征；共享时是同一个张量。"""
+
+        actor_depth = self.depth_encoder(observation["camera"])
+        if self.critic_depth_encoder is None:
+            return actor_depth, actor_depth
+        return actor_depth, self.critic_depth_encoder(observation["camera"])
+
     def _distribution(self, latent: torch.Tensor) -> Normal:
         mean = self.action_mean(self.actor_mlp(latent))
         return Normal(mean, self.log_std.exp().expand_as(mean))
@@ -211,7 +233,8 @@ class AsymmetricRecurrentActorCritic(nn.Module):
     ) -> tuple[torch.Tensor, RecurrentState]:
         """确定性评估仅计算 Actor，不读取 Critic 的特权观测。"""
         sequence = self._with_time_dimension(observation)
-        features = self.actor_encoder(sequence)
+        depth_feature = self.depth_encoder(sequence["camera"])
+        features = self.actor_encoder(sequence, depth_feature)
         output, actor_state = self.actor_recurrent(
             features, state.actor, episode_starts.unsqueeze(0)
         )
@@ -230,8 +253,9 @@ class AsymmetricRecurrentActorCritic(nn.Module):
 
         sequence = self._with_time_dimension(observation)
         starts = episode_starts.unsqueeze(0)
-        actor_features = self.actor_encoder(sequence)
-        critic_features = self.critic_encoder(sequence)
+        actor_depth, critic_depth = self._depth_features(sequence)
+        actor_features = self.actor_encoder(sequence, actor_depth)
+        critic_features = self.critic_encoder(sequence, critic_depth)
         actor_output, actor_state = self.actor_recurrent(
             actor_features, state.actor, starts
         )
@@ -253,8 +277,9 @@ class AsymmetricRecurrentActorCritic(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """评估 ``[时间, 序列, ...]`` 形式的训练批次。"""
 
-        actor_features = self.actor_encoder(observation)
-        critic_features = self.critic_encoder(observation)
+        actor_depth, critic_depth = self._depth_features(observation)
+        actor_features = self.actor_encoder(observation, actor_depth)
+        critic_features = self.critic_encoder(observation, critic_depth)
         actor_output, _ = self.actor_recurrent(
             actor_features, state.actor, episode_starts
         )
@@ -275,7 +300,8 @@ class AsymmetricRecurrentActorCritic(nn.Module):
         episode_starts: torch.Tensor,
     ) -> torch.Tensor:
         sequence = self._with_time_dimension(observation)
-        features = self.critic_encoder(sequence)
+        _, critic_depth = self._depth_features(sequence)
+        features = self.critic_encoder(sequence, critic_depth)
         output, _ = self.critic_recurrent(
             features, critic_state, episode_starts.unsqueeze(0)
         )

@@ -15,6 +15,9 @@ dependencies = [
     "scikit-fmm>=2025.1",
     "tensorboard>=2.10",
     "torch>=2.0",
+    # 深度编码器使用 torchvision 的 RegNetX-400MF 与 FeaturePyramidNetwork。
+    # FPN 的键名带一层 Conv2dNormActivation 嵌套，0.13 以前无法加载预训练权重。
+    "torchvision>=0.15",
     "tqdm>=4.66",
 ]
 

@@ -13,6 +13,12 @@ from isaaclab.app import AppLauncher
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--scene-type",
+        choices=("dfs", "obstacles"),
+        default="dfs",
+        help="要检查的场景类型：dfs 用小型迷宫，obstacles 用真实障碍场地尺寸",
+    )
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     app = AppLauncher(args).app
@@ -23,12 +29,14 @@ def main() -> None:
 
     env = None
     try:
+        # 两种场景都只缩小地图池和 TOA 分辨率，障碍场地保留真实尺寸与障碍物数量。
         config = EnvConfig(
             num_envs=2,
             train_map_count=2,
             eval_map_count=1,
             goals_per_map=2,
-            maze_size=7,
+            scene_type=args.scene_type,
+            maze_size=7 if args.scene_type == "dfs" else 15,
             toa_resolution=0.2,
             toa_cache_dir=None,
         )
@@ -75,7 +83,7 @@ def main() -> None:
         env.task.collision_force_threshold = 0.1
         wall_pose = env.robot.data.root_state_w[0:1, :7].clone()
         wall_pose[:, :2] = env.map_origins[0:1, :2]
-        wall_pose[:, 1] -= config.arena_half_extent - config.maze_cell_size - 0.05
+        wall_pose[:, 1] -= config.arena_half_extent - config.cell_size - 0.05
         env.robot.write_root_pose_to_sim(
             wall_pose, env_ids=torch.tensor([0], device=env.device)
         )

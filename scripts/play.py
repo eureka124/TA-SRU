@@ -75,13 +75,13 @@ def main() -> int:
             configure_evaluation,
             format_evaluation_table,
             load_evaluation_policy,
-            require_dfs_checkpoint,
+            require_scene_checkpoint,
         )
 
         stage = "读取 checkpoint"
         checkpoint_path = Path(args.checkpoint).resolve()
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        require_dfs_checkpoint(checkpoint)
+        require_scene_checkpoint(checkpoint)
         values = checkpoint["config"]
         env_values = configure_evaluation(values["env"])
         env_values["num_envs"] = args.num_envs

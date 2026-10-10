@@ -503,10 +503,10 @@ class RecurrentPPO:
         )
         require_supported_action_transform(checkpoint.get("action_transform"))
         if hasattr(self.env, "scene_manifest"):
-            from ta_sru.evaluation import require_dfs_checkpoint
+            from ta_sru.evaluation import require_scene_checkpoint
             from ta_sru.scene_config import validate_resume_config
 
-            require_dfs_checkpoint(checkpoint)
+            require_scene_checkpoint(checkpoint)
             validate_resume_config(checkpoint["config"]["env"], self.config.env)
             if checkpoint["scene_manifest"] != self.env.scene_manifest:
                 raise ValueError("checkpoint 地图/目标池或 TOA 定义不一致")

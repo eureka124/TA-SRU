@@ -24,6 +24,7 @@ from training_logging import (
 )
 
 RECURRENT_TYPES = ("sru-lstm", "sru-gru", "sru-lstm-gate", "lstm")
+SCENE_TYPES = ("dfs", "obstacles")
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,6 +94,23 @@ def parse_args() -> argparse.Namespace:
         "safety-margin",
         "spawn-margin",
         "min-start-goal-distance",
+    ):
+        parser.add_argument(f"--{option}", type=float, default=None)
+    parser.add_argument(
+        "--scene-type",
+        choices=SCENE_TYPES,
+        default=None,
+        help="场景类型：dfs 为 DFS 随机迷宫，obstacles 为随机圆柱与 U 形障碍场地",
+    )
+    for option in ("cylinder-count", "u-shape-count"):
+        parser.add_argument(f"--{option}", type=int, default=None)
+    for option in (
+        "arena-size",
+        "cylinder-radius",
+        "u-shape-arm-length",
+        "u-shape-arm-thickness",
+        "u-shape-opening",
+        "obstacle-min-separation",
     ):
         parser.add_argument(f"--{option}", type=float, default=None)
     parser.add_argument("--toa-cache-dir", default=None)
@@ -197,7 +215,7 @@ def main() -> None:
     from isaaclab.app import AppLauncher
 
     args = parse_args()
-    from ta_sru.evaluation import require_dfs_checkpoint
+    from ta_sru.evaluation import require_scene_checkpoint
     from ta_sru.scene_config import training_env_config
 
     checkpoint = (
@@ -206,7 +224,7 @@ def main() -> None:
         else None
     )
     if checkpoint is not None:
-        require_dfs_checkpoint(checkpoint)
+        require_scene_checkpoint(checkpoint)
     saved = checkpoint["config"] if checkpoint else None
     algorithm = args.algorithm or (
         saved.get("algorithm", "recurrent_ppo") if saved else "recurrent_ppo"
@@ -249,6 +267,15 @@ def main() -> None:
             "goals_per_map",
             "maze_cell_size",
             "maze_wall_removal_probability",
+            "scene_type",
+            "arena_size",
+            "cylinder_count",
+            "cylinder_radius",
+            "u_shape_count",
+            "u_shape_arm_length",
+            "u_shape_arm_thickness",
+            "u_shape_opening",
+            "obstacle_min_separation",
             "toa_resolution",
             "episode_seconds",
             "safety_margin",

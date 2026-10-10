@@ -26,7 +26,7 @@ from ta_sru.envs.toa import (
     obstacle_clearance,
 )
 from ta_sru.envs.toa_sampling import normalized_progress, sample_toa
-from ta_sru.evaluation import EvaluationStats, MapQuotaScheduler, require_dfs_checkpoint
+from ta_sru.evaluation import EvaluationStats, MapQuotaScheduler, require_scene_checkpoint
 from ta_sru.scene_config import training_env_config, validate_resume_config
 
 
@@ -278,8 +278,8 @@ class DfsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             training_env_config(asdict(config), {"maze_size": 9})
         with self.assertRaises(ValueError):
-            require_dfs_checkpoint({"config": {}})
-        require_dfs_checkpoint({"scene_manifest": {"scene_version": SCENE_VERSION}})
+            require_scene_checkpoint({"config": {}})
+        require_scene_checkpoint({"scene_manifest": {"scene_version": SCENE_VERSION}})
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""独立于仿真的 DFS 地图、几何与可复现地图池。"""
+"""独立于仿真的场景地图、共用几何与可复现地图池。"""
 
 from __future__ import annotations
 
@@ -9,15 +9,29 @@ from dataclasses import dataclass
 import numpy as np
 
 from ta_sru.config import EnvConfig
+from ta_sru.envs.primitives import Box, Solid, solid_record
 
 GENERATOR_VERSION = "dfs-walls-v1"
 SCENE_VERSION = "dfs-point-toa-start-normalized-v1"
+OBSTACLE_GENERATOR_VERSION = "obstacle-field-bridson-v1"
+OBSTACLE_SCENE_VERSION = "obstacle-field-point-toa-start-normalized-v1"
+
+SCENE_VERSIONS = {"dfs": SCENE_VERSION, "obstacles": OBSTACLE_SCENE_VERSION}
+GENERATOR_VERSIONS = {"dfs": GENERATOR_VERSION, "obstacles": OBSTACLE_GENERATOR_VERSION}
 
 
 def digest(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def scene_version(scene_type: str) -> str:
+    """返回场景类型的清单版本，用于校验 checkpoint 属于同一种场景。"""
+
+    if scene_type not in SCENE_VERSIONS:
+        raise ValueError(f"未知场景类型：{scene_type}")
+    return SCENE_VERSIONS[scene_type]
 
 
 @dataclass(frozen=True)
@@ -27,6 +41,8 @@ class MazeDefinition:
     occupied: np.ndarray
     cell_size: float
     wall_height: float
+    # 每个元素是一个障碍物，由若干实体图元组成：圆柱一个，U 形障碍三块墙。
+    obstacles: tuple[tuple[Solid, ...], ...] = ()
 
     @property
     def extent(self) -> float:
@@ -34,9 +50,14 @@ class MazeDefinition:
 
     @property
     def content_hash(self) -> str:
-        return digest(
-            [self.occupied.astype(int).tolist(), self.cell_size, self.wall_height]
-        )
+        payload = [self.occupied.astype(int).tolist(), self.cell_size, self.wall_height]
+        # 只有障碍场地才扩展散列，让 DFS 的内容散列保持历史取值，
+        # 已有 TOA 磁盘缓存与 checkpoint 继续有效。
+        if self.obstacles:
+            payload.append(
+                [solid_record(solid) for group in self.obstacles for solid in group]
+            )
+        return digest(payload)
 
     def rectangles(self) -> list[tuple[float, float, float, float]]:
         """按行合并相邻墙格，严格保持物理占用区域的并集。"""
@@ -55,6 +76,21 @@ class MazeDefinition:
                     )
                 )
         return result
+
+    def wall_boxes(self) -> list[Box]:
+        """围墙的图元形式，与 rectangles 的并集一致。"""
+
+        return [
+            Box(x, y, 0.0, size_x, size_y, 0.0, self.wall_height)
+            for x, y, size_x, size_y in self.rectangles()
+        ]
+
+    def solids(self) -> list[Solid]:
+        """围墙与障碍物的全部实体，供距离场、网格和回放共用。"""
+
+        return self.wall_boxes() + [
+            solid for group in self.obstacles for solid in group
+        ]
 
 
 def generate_maze(config: EnvConfig, seed: int, name: str = "maze") -> MazeDefinition:
@@ -97,6 +133,19 @@ def generate_maze(config: EnvConfig, seed: int, name: str = "maze") -> MazeDefin
     )
 
 
+def generate_map(
+    config: EnvConfig, seed: int, name: str = "map"
+) -> MazeDefinition:
+    """按场景类型生成一张地图。"""
+
+    if config.scene_type == "obstacles":
+        # 延迟导入避免 maze 与 obstacles 两个模块互相引用。
+        from ta_sru.envs.obstacles import generate_obstacle_field
+
+        return generate_obstacle_field(config, seed, name)
+    return generate_maze(config, seed, name)
+
+
 def build_map_pools(config: EnvConfig) -> dict[str, list[MazeDefinition]]:
     """两个池的内容去重，不依赖环境数、网络随机流或当前选择的池。"""
     config.validate()
@@ -113,7 +162,7 @@ def build_map_pools(config: EnvConfig) -> dict[str, list[MazeDefinition]]:
                         [config.maze_seed, namespace, index, attempt]
                     ).generate_state(1)[0]
                 )
-                maze = generate_maze(config, seed, f"{split}_{index:03d}")
+                maze = generate_map(config, seed, f"{split}_{index:03d}")
                 if maze.content_hash not in seen:
                     seen.add(maze.content_hash)
                     maps.append(maze)
@@ -134,45 +183,41 @@ def pool_origins(count: int, extent: float, gap: float) -> np.ndarray:
     ) * (2 * extent + gap)
 
 
+def prism(
+    solid: Solid, origin: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """把图元水平截面拉伸成棱柱，返回顶点与逆时针朝外的三角面。"""
+
+    corners = solid.corners()
+    count = len(corners)
+    bottom = np.column_stack((corners, np.full(count, solid.z0)))
+    top = np.column_stack((corners, np.full(count, solid.z1)))
+    points = np.vstack((bottom, top)) + origin
+    faces = []
+    for index in range(count):
+        following = (index + 1) % count
+        faces.append((index, following, count + following))
+        faces.append((index, count + following, count + index))
+    for index in range(1, count - 1):
+        faces.append((0, index + 1, index))
+        faces.append((count, count + index, count + index + 1))
+    return points, np.asarray(faces, dtype=np.int32)
+
+
 def pool_mesh(
     maps: list[MazeDefinition], origins: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """墙体和地面合为静态三角网格，供碰撞与相机共用。"""
+    """墙体、障碍物和地面合为静态三角网格，供碰撞与相机共用。"""
+
     vertices, triangles = [], []
-    faces = np.asarray(
-        (
-            (0, 2, 1),
-            (0, 3, 2),
-            (4, 5, 6),
-            (4, 6, 7),
-            (0, 1, 5),
-            (0, 5, 4),
-            (1, 2, 6),
-            (1, 6, 5),
-            (2, 3, 7),
-            (2, 7, 6),
-            (3, 0, 4),
-            (3, 4, 7),
-        )
-    )
+    offset = 0
     for maze, origin in zip(maps, origins):
-        boxes = [(0, 0, 2 * maze.extent, 2 * maze.extent, -0.1, 0.0)]
-        boxes += [(*rect, 0.0, maze.wall_height) for rect in maze.rectangles()]
-        for x, y, sx, sy, z0, z1 in boxes:
-            points = np.asarray(
-                [
-                    (x - sx / 2, y - sy / 2, z0),
-                    (x + sx / 2, y - sy / 2, z0),
-                    (x + sx / 2, y + sy / 2, z0),
-                    (x - sx / 2, y + sy / 2, z0),
-                    (x - sx / 2, y - sy / 2, z1),
-                    (x + sx / 2, y - sy / 2, z1),
-                    (x + sx / 2, y + sy / 2, z1),
-                    (x - sx / 2, y + sy / 2, z1),
-                ]
-            )
-            triangles.append(faces + len(vertices) * 8)
-            vertices.append(points + origin)
+        floor = Box(0.0, 0.0, 0.0, 2 * maze.extent, 2 * maze.extent, -0.1, 0.0)
+        for solid in [floor, *maze.solids()]:
+            points, faces = prism(solid, origin)
+            vertices.append(points)
+            triangles.append(faces + offset)
+            offset += len(points)
     return np.concatenate(vertices).astype(np.float32), np.concatenate(
         triangles
     ).astype(np.int32)

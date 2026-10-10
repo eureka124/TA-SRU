@@ -98,6 +98,9 @@
         c.save(); c.translate(x(wall.xy[0]), y(wall.xy[1])); c.rotate(-wall.yaw);
         c.fillRect(-wall.size[0] * scale / 2, -wall.size[1] * scale / 2, wall.size[0] * scale, wall.size[1] * scale); c.restore();
       }
+      for (const cylinder of data.cylinders || []) {
+        c.beginPath(); c.arc(x(cylinder.xy[0]), y(cylinder.xy[1]), cylinder.radius * scale, 0, Math.PI * 2); c.fill();
+      }
       function circle(xy, radius, color) {
         c.fillStyle = color; c.beginPath(); c.arc(x(xy[0]), y(xy[1]), radius, 0, Math.PI * 2); c.fill();
       }

@@ -71,6 +71,7 @@ analysis/
 # DFS 验证入口与测试需要纳入版本控制。
 !tests/test_core.py
 !tests/test_dfs.py
+!tests/test_obstacles.py
 .cache/
 !scripts/check_dfs_scene.py
 !tests/test_training_logging.py

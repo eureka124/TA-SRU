@@ -1,6 +1,6 @@
 # TA-SRU
 
-TA-SRU 使用 Isaac Sim、Isaac Lab 和 PyTorch 训练 Hummingbird 无人机导航策略。无人机在启动时生成的 DFS＋随机拆墙地图池中，从起点飞到目标点。支持普通 PPO，以及使用 SRU-LSTM、SRU-GRU、SRU-LSTM-Gate 或 LSTM 的循环 PPO。
+TA-SRU 使用 Isaac Sim、Isaac Lab 和 PyTorch 训练 Hummingbird 无人机导航策略。无人机在启动时生成的地图池中，从起点飞到目标点；地图默认是 DFS＋随机拆墙迷宫，也可以切换成随机圆柱与 U 形障碍场地。支持普通 PPO，以及使用 SRU-LSTM、SRU-GRU、SRU-LSTM-Gate 或 LSTM 的循环 PPO。
 
 本文中的命令均在**项目根目录**执行。路径中的 `<运行名>`、`<时间戳>` 等占位符需要替换为实际值。
 
@@ -27,7 +27,8 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 
 | 文件 | 用途 |
 | --- | --- |
-| `scripts/check_dfs_scene.py` | 用两个小型环境检查共享场景、传感器及回合重置。 |
+| `scripts/check_dfs_scene.py` | 用两个小型环境检查共享场景、传感器及回合重置；`--scene-type obstacles` 检查障碍场地。 |
+| `scripts/preview_scene.py` | 不启动仿真，把地图池渲染成 PNG 并打印障碍物数量与最小表面间距。 |
 | `scripts/train.py` | 新建或恢复训练，启动仿真，创建运行目录，保存配置、日志和 checkpoint。 |
 | `scripts/play.py` | 加载命令行指定的 checkpoint，运行独立 DFS 地图池的评估，保存统计及可选回放。 |
 | `scripts/progress_to_tensorboard.py` | 将已有训练 `progress.csv` 回填为 TensorBoard 事件。 |
@@ -39,7 +40,9 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 | --- | --- |
 | `src/ta_sru/config.py` | `EnvConfig`、`NetworkConfig`、`PPOConfig`、`TrainConfig` 默认值和合法性检查。命令行未开放的设置在这里调整。 |
 | `src/ta_sru/evaluation.py` | 独立于仿真的评估配置、终局分类、每张地图的样本配额及汇总计算；作为包内模块供 `scripts/play.py` 和测试导入，无需单独运行。 |
-| `src/ta_sru/envs/maze.py` | DFS 生成、随机拆墙、地图内容去重及共用物理/射线几何。 |
+| `src/ta_sru/envs/maze.py` | 场景地图数据结构、DFS 生成、随机拆墙、地图内容去重、共用物理/射线网格及地图池分发。 |
+| `src/ta_sru/envs/primitives.py` | 障碍物图元（圆柱、带朝向长方体）、共享水平截面距离场与成对间距计算。 |
+| `src/ta_sru/envs/obstacles.py` | 随机圆柱与 U 形障碍场地生成：泊松盘采样摆位并保证最小表面间距。 |
 | `src/ta_sru/scene_config.py` | 恢复环境配置及兼容性检查。 |
 | `src/ta_sru/envs/toa_sampling.py` | 有效性检查、共享 TOA 采样与起点归一化奖励。 |
 | `src/ta_sru/envs/contact.py` | 计算当前策略步所有物理子步、所有机体部件的接触力峰值。 |
@@ -67,6 +70,7 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 | `tests/test_evaluation.py` | 检查独立评估池配置、结局优先级和每张地图配额。 |
 | `tests/test_playback.py` | 检查原始深度、视频编码、并行回合隔离及回放保存上限。 |
 | `tests/test_dfs.py` | DFS 树结构、几何、缓存、点目标 TOA、归一化奖励及恢复校验。 |
+| `tests/test_obstacles.py` | 障碍场地数量与间距、独立边界点复核、自由空间连通性、网格范围及场景版本校验。 |
 | `tests/test_core.py` | 网络、控制器惯性补偿、接触历史、TOA 归一化、buffer、PPO 更新和日志测试。 |
 | `pyproject.toml` | Python 包信息、依赖及打包配置。 |
 | `.gitignore` | 排除运行产物、缓存等；部分本地 shell 脚本也被忽略。 |
@@ -80,10 +84,11 @@ HXY 的训练参数可直接写在本地 shell 脚本中。脚本需先激活 Is
 
 ### 先进行短训练检查
 
-激活 Isaac Lab 环境后，可先运行独立的场景检查：
+激活 Isaac Lab 环境后，可先运行独立的场景检查。障碍场地保留真实场地尺寸与障碍物数量，只缩小地图池，用于确认网格生成、碰撞和深度相机都正常：
 
 ```bash
 python scripts/check_dfs_scene.py --headless --device cuda:0
+python scripts/check_dfs_scene.py --headless --device cuda:0 --scene-type obstacles
 ```
 
 
@@ -96,6 +101,37 @@ python scripts/train.py \
   --rollout-steps 32 --batch-size 32 --sequence-length 8 \
   --recurrent-type sru-lstm --maze-size 7 --train-map-count 2 --eval-map-count 2 --goals-per-map 2 --toa-resolution 0.2
 ```
+
+### 场景类型
+
+`--scene-type` 选择地图生成器，两种场景共用同一套 TOA、评估、回放和 checkpoint 校验流程。
+
+| 场景 | 场地 | 内容 |
+| --- | --- | --- |
+| `dfs`（默认） | `maze_size × maze_cell_size` | DFS 迷宫加随机拆墙。 |
+| `obstacles` | `arena_size` | 空地围墙内随机摆放 60 个半径 0.3 m 的圆柱与 5 个随机朝向的 U 形障碍。 |
+
+障碍场地默认 30×30 米（`arena_size=30`，均分给 `maze_size=15` 个格子，每格 2 m 决定围墙厚度与起点采样环）。摆放用泊松盘采样加精确成对测距，保证任意两个障碍物之间、障碍物与围墙之间至少留出 `obstacle_min_separation`（默认 1.2 m）的表面间距，因此场地内每条缝隙都宽于无人机直径加安全余量，自由空间保持单连通，起点到任意目标都存在可行路径。障碍物高度等于 `arena_height`，高于 2 m 的飞行高度，无人机无法越过。
+
+训练与评估障碍场地（评估沿用 checkpoint 内保存的同一套场景参数）：
+
+```bash
+python scripts/train.py \
+  --headless --device cuda:0 --network-device cuda:0 \
+  --scene-type obstacles --arena-size 30 \
+  --algorithm recurrent_ppo --recurrent-type sru-lstm \
+  --num-envs 6 --total-timesteps 70000000 \
+  --rollout-steps 512 --batch-size 512 --sequence-length 64 \
+  --toa-resolution 0.1 --log-dir runs
+```
+
+摆放前可以先看随机布局，该脚本不需要 Isaac Sim，只依赖 NumPy 和 Pillow：
+
+```bash
+python scripts/preview_scene.py --scene-type obstacles --maps 4
+```
+
+每个子种子摆不下时自动换种子重试，全部失败才报错。场地太小或障碍物太多时，报错会给出实际数量、尺寸和间距，按提示缩小障碍物或放大场地即可。障碍物数量与尺寸的可行上限受最小间距约束：默认场地在半径 0.3 m、间距 1.2 m 时可放置约 90 个圆柱，改动前建议用 `scripts/preview_scene.py` 先确认。
 
 ### 正式训练
 
@@ -134,9 +170,15 @@ python scripts/train.py \
 | `--maze-seed` | `123` | 地图生成种子，与回合/网络随机流隔离。 |
 | `--train-map-count` / `--eval-map-count` | `64` / `16` | 训练与独立评估的地图数量，内容不重叠。 |
 | `--goals-per-map` | `8` | 每张地图预采样并缓存 TOA 的目标数量。 |
-| `--maze-size` / `--maze-cell-size` | `15` / `4.0` | 包含外墙的奇数网格尺寸及每格米数；默认地图为 60×60 米。 |
+| `--maze-size` / `--maze-cell-size` | `15` / `4.0` | DFS 场景：包含外墙的奇数网格尺寸及每格米数；默认地图为 60×60 米。 |
 | `--maze-wall-removal-probability` | `0.25` | DFS 后每条剩余内部隔墙的拆除概率。 |
-| `--toa-resolution` | `0.1` | 期望 TOA 米制栅格间距；默认生成 601×601 图。 |
+| `--scene-type` | `dfs` | 场景类型：`dfs` 为 DFS 迷宫，`obstacles` 为随机圆柱与 U 形障碍场地。 |
+| `--arena-size` | `30.0` | 障碍场地边长，米；同时决定 TOA 栅格范围（30 米对应 301×301）。 |
+| `--cylinder-count` / `--cylinder-radius` | `60` / `0.3` | 障碍场地的圆柱数量与半径，米。 |
+| `--u-shape-count` | `5` | 障碍场地的 U 形障碍数量。 |
+| `--u-shape-arm-length` / `--u-shape-arm-thickness` / `--u-shape-opening` | `2.4` / `0.3` / `1.2` | U 形障碍臂长、臂厚与开口宽度，米。 |
+| `--obstacle-min-separation` | `1.2` | 障碍物之间、障碍物与围墙的最小表面间距，米；必须宽于无人机直径加安全余量。 |
+| `--toa-resolution` | `0.1` | 期望 TOA 米制栅格间距；默认 DFS 地图生成 601×601 图，30 米障碍场地生成 301×301 图。 |
 | `--toa-cache-dir` | `.cache/dfs_toa` | 可复用磁盘缓存，损坏项自动重建；无法写入时仍用内存缓存。 |
 | `--min-start-goal-distance` | `8.0` | 起终点最小水平直线距离，米。 |
 | `--safety-margin` / `--spawn-margin` | `0.1` / `0.1` | 障碍膨胀及额外出生余量，米。 |
@@ -185,6 +227,8 @@ python scripts/train.py \
 恢复时加载模型、优化器、训练步数、网络结构和历史最佳回报。算法及循环单元从 checkpoint 推断，不能切换。
 
 **环境配置完整继承 checkpoint**。CLI 缺省值不会覆盖已保存地图参数；显式更改地图、目标、TOA 或奖励定义会报错。运行设备、环境数、日志位置及缓存路径可以调整。PPO 批次参数仍由本次命令配置；`--total-timesteps` 是包含已训练步数的总目标。恢复会创建新的运行目录。
+
+`--scene-type` 及障碍场地参数同属场景定义，因此**不能**在恢复训练或评估时切换：DFS checkpoint 只能按 `dfs` 恢复，障碍场地 checkpoint 只能按 `obstacles` 恢复，否则报 `checkpoint 环境参数不兼容` 或场景版本不匹配。新增场景参数在旧 checkpoint 中缺失时按默认值处理，旧 DFS 运行仍可正常恢复。
 
 checkpoint 保存场景/生成器/TOA 版本、两个地图池及目标摘要和训练 TOA 观测量程。恢复时重新生成并核验，拒绝旧布局 checkpoint；恢复会开启新回合，不保证从中断的物理状态逐帧续演。
 

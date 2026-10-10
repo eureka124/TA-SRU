@@ -11,6 +11,9 @@ from math import ceil, isfinite
 
 RECURRENT_TYPES = ("sru-lstm", "sru-gru", "sru-lstm-gate", "lstm", "none")
 
+# 场景类型："dfs" 生成 DFS 随机迷宫，"obstacles" 生成随机圆柱与 U 形障碍场地。
+SCENE_TYPES = ("dfs", "obstacles")
+
 
 def normalize_recurrent_type(value: str) -> str:
     return {"nn.lstm": "lstm"}.get(value.lower(), value.lower().replace("_", "-"))
@@ -43,6 +46,20 @@ class EnvConfig:
     maze_size: int = 15
     maze_cell_size: float = 4.0
     maze_wall_removal_probability: float = 0.25
+    # 场景类型，决定地图生成器。
+    scene_type: str = "dfs"
+    # 障碍场地边长，单位为米；DFS 场景忽略该项，场地由 maze_size × maze_cell_size 决定。
+    arena_size: float = 30.0
+    # 障碍场地的圆柱数量与半径，单位为米。
+    cylinder_count: int = 60
+    cylinder_radius: float = 0.3
+    # 障碍场地的 U 形障碍数量、臂长、臂厚与开口宽度，单位为米。
+    u_shape_count: int = 5
+    u_shape_arm_length: float = 2.4
+    u_shape_arm_thickness: float = 0.3
+    u_shape_opening: float = 1.2
+    # 障碍物之间、障碍物与围墙之间的最小表面间距，单位为米。
+    obstacle_min_separation: float = 1.2
     arena_height: float = 4.0
     drone_radius: float = 0.4
     safety_margin: float = 0.1
@@ -103,8 +120,16 @@ class EnvConfig:
     total_training_steps: int = 70_000_000
 
     @property
+    def cell_size(self) -> float:
+        """场景栅格边长：障碍场地由 arena_size 均分给 maze_size 格，DFS 用配置值。"""
+
+        if self.scene_type == "obstacles":
+            return self.arena_size / self.maze_size
+        return self.maze_cell_size
+
+    @property
     def arena_half_extent(self) -> float:
-        return self.maze_size * self.maze_cell_size / 2
+        return self.maze_size * self.cell_size / 2
 
     @property
     def toa_grid_size(self) -> int:
@@ -129,6 +154,11 @@ class EnvConfig:
             raise ValueError("physics_dt 和 control_decimation 必须为正数")
         for name in (
             "maze_cell_size",
+            "arena_size",
+            "cylinder_radius",
+            "u_shape_arm_length",
+            "u_shape_arm_thickness",
+            "u_shape_opening",
             "arena_height",
             "drone_radius",
             "toa_resolution",
@@ -144,9 +174,13 @@ class EnvConfig:
             value = getattr(self, name)
             if not isfinite(value) or value <= 0:
                 raise ValueError(f"{name} 必须为有限正数")
-        for name in ("safety_margin", "spawn_margin"):
+        for name in ("safety_margin", "spawn_margin", "obstacle_min_separation"):
             if not isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} 必须为有限非负数")
+        if self.scene_type not in SCENE_TYPES:
+            raise ValueError(f"场景类型必须是以下值之一：{', '.join(SCENE_TYPES)}")
+        if self.cylinder_count < 0 or self.u_shape_count < 0:
+            raise ValueError("障碍物数量不能为负数")
         if self.maze_size < 5 or self.maze_size % 2 == 0:
             raise ValueError("maze_size 必须为不小于 5 的奇数")
         if min(self.train_map_count, self.eval_map_count, self.goals_per_map) <= 0:
@@ -155,8 +189,8 @@ class EnvConfig:
             raise ValueError("随机种子不能为负数")
         if not 0 <= self.maze_wall_removal_probability <= 1:
             raise ValueError("拆墙概率必须位于 [0, 1]")
-        if self.maze_cell_size <= 2 * (self.drone_radius + self.safety_margin + self.spawn_margin):
-            raise ValueError("通道宽度不足以容纳无人机及出生余量")
+        if self.cell_size <= 2 * (self.drone_radius + self.safety_margin + self.spawn_margin):
+            raise ValueError("场景栅格宽度不足以容纳无人机及出生余量")
         if self.map_split not in ("train", "eval") or self.evaluation_episodes_per_map < 0:
             raise ValueError("地图池或评估配额不合法")
         if self.toa_crop_size != 16:

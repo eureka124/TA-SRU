@@ -15,6 +15,7 @@ import imageio_ffmpeg
 import numpy as np
 import torch
 
+from ta_sru.envs.primitives import Box, Disc
 from ta_sru.models.hummingbird import rotate_inverse, yaw_from_quaternion
 
 if TYPE_CHECKING:
@@ -86,9 +87,16 @@ class PlayDebugRecorder:
         origin = _numpy(env.map_origins[env_id, :2])
         map_id = int(env.map_ids[env_id].item())
         maze = env.map_definitions[map_id]
+        solids = maze.solids()
         rectangles = [
-            {"xy": [x, y], "size": [sx, sy], "yaw": 0.0}
-            for x, y, sx, sy in maze.rectangles()
+            {"xy": [solid.x, solid.y], "size": [solid.size_x, solid.size_y], "yaw": solid.yaw}
+            for solid in solids
+            if isinstance(solid, Box)
+        ]
+        cylinders = [
+            {"xy": [solid.x, solid.y], "radius": solid.radius}
+            for solid in solids
+            if isinstance(solid, Disc)
         ]
         return {
             "env_id": env_id,
@@ -98,6 +106,7 @@ class PlayDebugRecorder:
             "goal": (_numpy(env.goal_positions[env_id, :2]) - origin).tolist(),
             "start": (_numpy(env.robot.data.root_pos_w[env_id, :2]) - origin).tolist(),
             "rectangles": rectangles,
+            "cylinders": cylinders,
             "map_hash": maze.content_hash,
             "goal_id": int(env.goal_ids[env_id].item()),
             "episode_start_toa": float(env.episode_start_toa[env_id].item()),

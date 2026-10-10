@@ -17,12 +17,13 @@ import skfmm
 
 from ta_sru.config import EnvConfig
 from ta_sru.envs.maze import (
-    GENERATOR_VERSION,
-    SCENE_VERSION,
+    GENERATOR_VERSIONS,
     MazeDefinition,
     build_map_pools,
     digest,
+    scene_version,
 )
+from ta_sru.envs.primitives import footprint_sdf
 
 TOA_VERSION = "fmm-point-zero-v1"
 
@@ -38,13 +39,10 @@ def coordinates(config: EnvConfig) -> np.ndarray:
 
 def obstacle_clearance(config: EnvConfig, maze: MazeDefinition) -> np.ndarray:
     grid_x, grid_y = np.meshgrid(coordinates(config), coordinates(config))
+    points = np.stack((grid_x, grid_y), axis=-1)
     clearance = np.full(grid_x.shape, np.inf, dtype=np.float32)
-    for x, y, sx, sy in maze.rectangles():
-        dx, dy = np.abs(grid_x - x) - sx / 2, np.abs(grid_y - y) - sy / 2
-        sdf = np.hypot(np.maximum(dx, 0), np.maximum(dy, 0)) + np.minimum(
-            np.maximum(dx, dy), 0
-        )
-        clearance = np.minimum(clearance, sdf)
+    for solid in maze.solids():
+        clearance = np.minimum(clearance, footprint_sdf(points, solid))
     return clearance - (config.drone_radius + config.safety_margin)
 
 
@@ -82,8 +80,7 @@ def start_candidates(config: EnvConfig, clearance: np.ndarray) -> np.ndarray:
     """只保留边界墙内侧第一圈格子中满足出生余量的 TOA 栅格点。"""
     candidates = np.argwhere(clearance > config.spawn_margin)
     cells = np.floor(
-        (coordinates(config)[candidates] + config.arena_half_extent)
-        / config.maze_cell_size
+        (coordinates(config)[candidates] + config.arena_half_extent) / config.cell_size
     ).astype(np.int32)
     outer_ring = np.any((cells == 1) | (cells == config.maze_size - 2), axis=1)
     return candidates[outer_ring]
@@ -295,8 +292,8 @@ def build_toa_bank(config: EnvConfig) -> ToaBank:
             starts.append(candidates[eligible_start].astype(np.int32))
         metadata[split] = records
     manifest = {
-        "scene_version": SCENE_VERSION,
-        "generator": GENERATOR_VERSION,
+        "scene_version": scene_version(config.scene_type),
+        "generator": GENERATOR_VERSIONS[config.scene_type],
         "toa_version": TOA_VERSION,
         "solver": skfmm.__version__,
         "toa_reward_normalization": "episode_start",
@@ -320,6 +317,24 @@ def build_toa_bank(config: EnvConfig) -> ToaBank:
         },
         "success_radius": config.goal_threshold,
     }
+    # DFS 清单保持历史结构；只有障碍场地才追加参数，旧 checkpoint 仍能逐字段比对。
+    if config.scene_type == "obstacles":
+        manifest["obstacle_field"] = {
+            "arena_size": config.arena_size,
+            "cell_size": config.cell_size,
+            "height": config.arena_height,
+            "min_separation": config.obstacle_min_separation,
+            "cylinders": {
+                "count": config.cylinder_count,
+                "radius": config.cylinder_radius,
+            },
+            "u_shapes": {
+                "count": config.u_shape_count,
+                "arm_length": config.u_shape_arm_length,
+                "arm_thickness": config.u_shape_arm_thickness,
+                "opening": config.u_shape_opening,
+            },
+        }
     bank = ToaBank(
         pools[config.map_split],
         np.asarray(goals_xy, dtype=np.float32),

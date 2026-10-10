@@ -178,6 +178,8 @@ def make_isaac_env_cfg(task: EnvConfig, sim_device: str) -> IsaacNavigationEnvCf
     cfg.scene.camera.pattern_cfg.width = task.depth_width * 4
     cfg.scene.camera.update_period = task.policy_dt
     cfg.scene.camera.max_distance = task.depth_max_distance
+    # 地图池按场地范围加相机截断间距平铺，环境间距必须与 pool_origins 保持一致。
+    cfg.scene.env_spacing = 2 * task.arena_half_extent + 2 * task.depth_max_distance + 2
     return cfg
 
 

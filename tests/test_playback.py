@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from ta_sru.debug.playback import PlayDebugRecorder, depth_to_gray
+from ta_sru.envs.primitives import Box, Disc
 
 
 def _env():
@@ -23,8 +24,15 @@ def _env():
     return SimpleNamespace(
         num_envs=2,
         map_origins=torch.tensor([[0.0, 0.0, 0.0], [50.0, 0.0, 0.0]]),
-        map_definitions=[SimpleNamespace(rectangles=lambda: [(1, 2, 12, 2)], content_hash="first"),
-                         SimpleNamespace(rectangles=lambda: [(-2, 6, 2, 4)], content_hash="second")],
+        map_definitions=[
+            SimpleNamespace(
+                solids=lambda: [Box(1, 2, 0.0, 12, 2, 0.0, 4.0)], content_hash="first"
+            ),
+            SimpleNamespace(
+                solids=lambda: [Box(-2, 6, 0.0, 2, 4, 0.0, 4.0), Disc(4, -4, 0.5, 0.0, 4.0)],
+                content_hash="second",
+            ),
+        ],
         map_names=["train_000", "train_001"],
         goal_ids=torch.tensor([0, 1]),
         episode_start_toa=torch.tensor([25.0, 40.0]),
@@ -107,6 +115,7 @@ class PlaybackTests(unittest.TestCase):
             reset_data = json.loads((reset / "telemetry.json").read_text())
             self.assertEqual(reset_data["start"], [-5, -2])
             self.assertEqual(reset_data["rectangles"][0]["xy"], [-2, 6])
+            self.assertEqual(reset_data["cylinders"], [{"xy": [4, -4], "radius": 0.5}])
             self.assertEqual(reset_data["map_hash"], "second")
             self.assertEqual(reset_data["samples"][0]["xy"], [-4, -2])
             self.assertEqual(reset_data["samples"][0]["t"], 1 / 24)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unicodedata import east_asian_width
 
-from ta_sru.envs.maze import SCENE_VERSION
+from ta_sru.envs.maze import scene_version
 
 
 def configure_evaluation(values: dict) -> dict:
@@ -33,7 +33,7 @@ def load_evaluation_policy(checkpoint: dict, device: str):
 
     # 评估不经过 RecurrentPPO.load，必须在这里单独校验动作参数化方式。
     require_supported_action_transform(checkpoint.get("action_transform"))
-    require_dfs_checkpoint(checkpoint)
+    require_scene_checkpoint(checkpoint)
     values = checkpoint["config"]
     network = NetworkConfig(**values["network"])
     algorithm = values.get("algorithm", "recurrent_ppo")
@@ -148,11 +148,17 @@ class EvaluationStats:
         }
 
 
-def require_dfs_checkpoint(checkpoint: dict) -> None:
+def require_scene_checkpoint(checkpoint: dict) -> None:
+    """校验 checkpoint 的场景版本与它训练时的场景类型一致。"""
+
     manifest = checkpoint.get("scene_manifest")
-    if not isinstance(manifest, dict) or manifest.get("scene_version") != SCENE_VERSION:
+    values = checkpoint.get("config") or {}
+    scene_type = values.get("scene_type", "dfs")
+    if not isinstance(manifest, dict) or manifest.get("scene_version") != (
+        scene_version(scene_type)
+    ):
         raise ValueError(
-            "checkpoint 不属于当前 DFS/起点 TOA 归一化任务，不能恢复或评估旧场景"
+            "checkpoint 不属于当前任务场景或起点 TOA 归一化任务，不能恢复或评估"
         )
 
 

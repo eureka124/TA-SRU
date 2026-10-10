@@ -1,4 +1,4 @@
-"""DFS 场景的配置恢复与兼容性校验。"""
+"""场景的配置恢复与兼容性校验。"""
 
 from __future__ import annotations
 
@@ -37,6 +37,11 @@ def validate_resume_config(saved: dict, current: EnvConfig) -> None:
     saved = dict(saved)
     # 旧训练阈值统一迁移到当前固定阈值，其他参数仍严格校验。
     saved["collision_force_threshold"] = 0.1
+    defaults = asdict(EnvConfig())
     for key, value in asdict(current).items():
-        if key not in RUNTIME_FIELDS and saved.get(key) != value:
+        if key in RUNTIME_FIELDS:
+            continue
+        # 旧 checkpoint 缺少的场景参数按默认值补齐后比对：新增字段只要默认值保持
+        # 原有行为，旧训练就能继续恢复；真正的布局差异由清单版本核对拦下。
+        if saved.get(key, defaults[key]) != value:
             raise ValueError(f"checkpoint 环境参数不兼容：{key}")

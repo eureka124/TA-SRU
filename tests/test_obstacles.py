@@ -251,6 +251,41 @@ class ObstacleFieldTests(unittest.TestCase):
         maze = generate_obstacle_field(config, 3)
         self.assertEqual(2 * maze.extent, config.arena_size)
 
+    def test_cylinders_cover_the_area_evenly(self):
+        """圆柱生长到饱和后才抽样，不允许在允许区域内留下整片空区。
+
+        早期实现一边生长一边在凑够数量时停止，每张地图都是围绕初始种子点的一团，
+        种子对侧会空掉一大片：8 张地图 4×4 分区计数的极差达到 0.83× 理想值，
+        饱和后抽样降到约 0.50×，因此阈值取 0.65×。
+        """
+
+        config = self.config(train_map_count=8)
+        maps = build_map_pools(config)["train"]
+        limit = (
+            config.arena_half_extent
+            - config.cell_size
+            - config.obstacle_min_separation
+            - config.cylinder_radius
+        )
+        edges = np.linspace(-limit, limit, 5)
+        counts = np.zeros((4, 4))
+        for maze in maps:
+            centres = np.asarray(
+                [
+                    (solid.x, solid.y)
+                    for group in maze.obstacles
+                    for solid in group
+                    if isinstance(solid, Disc)
+                ]
+            )
+            column = np.clip(np.searchsorted(edges, centres[:, 0], side="right") - 1, 0, 3)
+            row = np.clip(np.searchsorted(edges, centres[:, 1], side="right") - 1, 0, 3)
+            np.add.at(counts, (row, column), 1)
+        counts /= len(maps)
+        ideal = config.cylinder_count / counts.size
+        self.assertGreater(float(counts.min()), 0.5 * ideal)
+        self.assertLess(float(counts.max() - counts.min()), 0.65 * ideal)
+
     def test_old_checkpoints_resume_with_default_scene_fields(self):
         """旧 checkpoint 没有场景字段时按默认 DFS 恢复，切换场景则必须报错。"""
 

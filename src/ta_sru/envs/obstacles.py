@@ -1,8 +1,9 @@
 """随机圆柱与 U 形障碍场地生成，不依赖 Isaac Sim。
 
-场地是四面围墙围出的空地：先摆 U 形障碍，再用泊松盘采样摆圆柱。摆放阶段要求障碍物
-之间、障碍物与围墙之间至少留出 ``obstacle_min_separation`` 的表面间距，因此场地内每条
-缝隙都宽于无人机直径加安全余量，起点与目标之间始终存在可行路径。
+场地是四面围墙围出的空地：先摆 U 形障碍，再用泊松盘采样摆圆柱。圆柱一直生长到饱和
+（再加不进新点）才随机抽取目标数量，否则布局会围着初始种子点聚成一团、对侧留出空区。
+摆放阶段要求障碍物之间、障碍物与围墙之间至少留出 ``obstacle_min_separation`` 的表面
+间距，因此场地内每条缝隙都宽于无人机直径加安全余量，起点与目标之间始终存在可行路径。
 """
 
 from __future__ import annotations
@@ -104,7 +105,11 @@ def _poisson_cylinders(
     separation: float,
     blocking: list[tuple[Solid, ...]],
 ) -> list[Disc] | None:
-    """泊松盘采样圆柱中心：邻域网格保证圆柱互不重叠，其余障碍物逐个精确测距。"""
+    """泊松盘采样圆柱中心：邻域网格保证圆柱互不重叠，其余障碍物逐个精确测距。
+
+    生长一直进行到饱和（再也放不下新点）才随机抽取目标数量。若一边生长一边在凑够
+    数量时停止，每张地图都会是围绕初始种子点的一团，种子对侧留出大片空白。
+    """
 
     if config.cylinder_count == 0:
         return []
@@ -154,15 +159,16 @@ def _poisson_cylinders(
             remember(candidate)
             sites.append(candidate)
             active.append(candidate)
-            if len(sites) == config.cylinder_count:
-                return [
-                    Disc(x, y, radius, 0.0, config.arena_height) for x, y in sites
-                ]
             break
         else:
             active[chosen] = active[-1]
             active.pop()
-    return None
+    if len(sites) < config.cylinder_count:
+        return None
+    if len(sites) > config.cylinder_count:
+        kept = rng.choice(len(sites), size=config.cylinder_count, replace=False)
+        sites = [sites[int(index)] for index in kept]
+    return [Disc(x, y, radius, 0.0, config.arena_height) for x, y in sites]
 
 
 def _first_cylinder(

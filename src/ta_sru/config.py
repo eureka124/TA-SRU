@@ -55,7 +55,7 @@ class EnvConfig:
     cylinder_radius: float = 0.3
     # 障碍场地的 U 形障碍数量、臂长、臂厚与开口宽度，单位为米。
     u_shape_count: int = 5
-    u_shape_arm_length: float = 2.4
+    u_shape_arm_length: float = 1.5
     u_shape_arm_thickness: float = 0.3
     u_shape_opening: float = 1.2
     # 障碍物之间、障碍物与围墙之间的最小表面间距，单位为米。

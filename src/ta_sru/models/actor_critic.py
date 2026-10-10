@@ -127,7 +127,11 @@ class CriticEncoder(nn.Module):
 
 
 class AsymmetricRecurrentActorCritic(nn.Module):
-    """Actor/Critic 各自拥有编码器、可切换循环单元和 MLP。"""
+    """复用一个冻结深度编码器的非对称 Actor–Critic。
+
+    Actor 与 Critic 各自持有 robot_state 投影、循环单元和 MLP，Critic 另有一个
+    TOA 编码器；深度编码器由两者共享，只前向一次。
+    """
 
     action_size = 3
     robot_state_size = 8

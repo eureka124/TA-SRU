@@ -18,8 +18,9 @@ RUNTIME_FIELDS = {
 def training_env_config(saved: dict | None, overrides: dict) -> EnvConfig:
     """缺省 CLI 不覆盖 checkpoint；仅运行参数允许显式改变。"""
     values = dict(saved) if saved is not None else asdict(EnvConfig())
-    # 旧 checkpoint 的阈值课程字段已废弃，恢复时只保留固定阈值。
+    # 旧 checkpoint 的碰撞课程字段已废弃，恢复时使用固定阈值和完整惩罚。
     values.pop("minimum_contact_force_threshold", None)
+    values.pop("contact_penalty_ramp_fraction", None)
     for key, value in overrides.items():
         if value is None:
             continue

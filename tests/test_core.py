@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import csv
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -12,6 +14,7 @@ from ta_sru.algorithms import RecurrentPPO
 from ta_sru.config import EnvConfig, NetworkConfig, PPOConfig, TrainConfig
 from ta_sru.envs.contact import peak_contact_force
 from ta_sru.envs.toa import resolve_toa_normalization_max
+from ta_sru.export import export_actor
 from ta_sru.models import (
     AsymmetricRecurrentActorCritic,
     HummingbirdParameters,
@@ -150,7 +153,10 @@ class ModelTests(unittest.TestCase):
         # 值本身。对数概率必须与采样时刻一致，否则 PPO 的概率比会带上一个与动作
         # 相关的系统偏差。
         _, replayed, _ = model.evaluate_sequences(
-            {key: value.unsqueeze(0) for key, value in observation.items()},
+            {
+                key: value.unsqueeze(0)
+                for key, value in model.encode_depth_observation(observation).items()
+            },
             action.unsqueeze(0),
             state,
             starts.unsqueeze(0),
@@ -215,9 +221,10 @@ class TaskTests(unittest.TestCase):
 
 class AlgorithmTests(unittest.TestCase):
     def test_cpu_buffer_and_ppo_update(self) -> None:
-        for recurrent_type in ("sru-lstm", "sru-gru", "sru-lstm-gate", "lstm"):
+        for recurrent_type in ("sru-lstm", "sru-gru", "sru-lstm-gate", "lstm", "none"):
             with self.subTest(recurrent_type=recurrent_type):
                 config = TrainConfig(
+                    algorithm="ppo" if recurrent_type == "none" else "recurrent_ppo",
                     env=EnvConfig(num_envs=2, depth_height=12, depth_width=16),
                     network=NetworkConfig(
                         feature_dim=256,
@@ -244,9 +251,18 @@ class AlgorithmTests(unittest.TestCase):
                     )
                 )
                 agent.collect_rollout()
-                metrics = agent.update()
+                self.assertNotIn("camera", agent.buffer.observations)
+                self.assertIn("depth_features", agent.buffer.observations)
+                with patch.object(
+                    agent.policy.depth_encoder,
+                    "forward",
+                    side_effect=AssertionError("PPO 更新不能重新编码图像"),
+                ):
+                    metrics = agent.update()
                 self.assertTrue(np.isfinite(metrics["policy_loss"]))
                 self.assertTrue(np.isfinite(metrics["value_loss"]))
+                self.assertTrue(np.isfinite(metrics["analytic_kl"]))
+                self.assertEqual(metrics["optimizer_steps"], 2)
 
     def test_checkpoint_round_trip_loads_and_rejects_other_parameterization(
         self,
@@ -271,13 +287,37 @@ class AlgorithmTests(unittest.TestCase):
                 checkpoint_dir=str(Path(directory) / "checkpoints"),
             )
             path = Path(directory) / "checkpoints" / "model.pt"
-            RecurrentPPO(FakeVectorEnv(), config).save(path)
-            RecurrentPPO(FakeVectorEnv(), config).load(path)
+            agent = RecurrentPPO(FakeVectorEnv(), config)
+            # 编码器权重以 checkpoint 为准，加载后不能沿用默认权重的初始特征。
+            agent.policy.depth_encoder.vae_sampler.mean_layers[-1].bias.add_(1.0)
+            agent.optimizer.param_groups[0]["lr"] = 2e-4
+            agent.save(path)
+            restored = RecurrentPPO(FakeVectorEnv(), config)
+            before = restored.observation["depth_features"].copy()
+            restored.load(path)
+            np.testing.assert_allclose(
+                restored.observation["depth_features"], before + 1.0, atol=1e-5
+            )
+            self.assertEqual(restored.optimizer.param_groups[0]["lr"], 2e-4)
+            artifact_path = export_actor(path, Path(directory) / "actor.pt")
+            artifact = torch.load(artifact_path, map_location="cpu", weights_only=True)
+            self.assertEqual(artifact["version"], 2)
+            self.assertTrue(
+                any(key.startswith("depth_encoder.") for key in artifact["actor"])
+            )
 
             # 写出的 checkpoint 必须带动作参数化标识，否则新 checkpoint 会被当成
             # 旧版本，在另一个分支上静默加载。
             saved = torch.load(path, map_location="cpu", weights_only=True)
             self.assertEqual(saved["action_transform"], "clamp")
+
+            # 未记录调度方式的旧 checkpoint 仍能加载，并启用新的初始学习率。
+            saved["config"]["ppo"].pop("schedule")
+            torch.save(saved, path)
+            restored.load(path)
+            self.assertEqual(
+                restored.optimizer.param_groups[0]["lr"], config.ppo.learning_rate
+            )
 
             # 把标识改成 main 分支的 tanh 版本，加载必须失败而不是产生错误动作。
             saved["action_transform"] = "tanh"
@@ -312,6 +352,9 @@ class AlgorithmTests(unittest.TestCase):
             progress = (Path(directory) / "progress.csv").read_text(encoding="utf-8")
             self.assertIn("recurrent_type", progress)
             self.assertIn("sru-gru", progress)
+            row = next(csv.DictReader(progress.splitlines()))
+            self.assertGreaterEqual(int(row["optimizer_steps"]), 0)
+            self.assertGreater(float(row["learning_rate"]), 0)
             accumulator = EventAccumulator(directory)
             accumulator.Reload()
             scalar_tags = set(accumulator.Tags()["scalars"])
@@ -319,6 +362,10 @@ class AlgorithmTests(unittest.TestCase):
                 {
                     "progress/policy_loss",
                     "progress/cpu_buffer_mib",
+                    "progress/optimizer_steps",
+                    "progress/analytic_kl",
+                    "progress/learning_rate",
+                    "train/analytic_kl",
                     "rollout/ep_len_mean",
                     "rollout/ep_rew_mean",
                     "time/fps",
@@ -331,6 +378,11 @@ class AlgorithmTests(unittest.TestCase):
                 }.issubset(scalar_tags)
             )
             self.assertEqual(len(accumulator.Scalars("progress/update")), 1)
+            for name in ("optimizer_steps", "learning_rate", "analytic_kl"):
+                self.assertAlmostEqual(
+                    accumulator.Scalars(f"progress/{name}")[0].value,
+                    float(row[name]),
+                )
             self.assertAlmostEqual(
                 accumulator.Scalars("progress/contact_force_threshold")[0].value,
                 config.env.collision_force_threshold,

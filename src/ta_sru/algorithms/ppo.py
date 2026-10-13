@@ -17,6 +17,7 @@ from tqdm.auto import tqdm
 
 from ta_sru.algorithms.buffer import CpuFeedForwardBuffer, CpuRolloutBuffer
 from ta_sru.config import TrainConfig
+from ta_sru.envs.wrappers import DepthFeatureWrapper
 from ta_sru.models.actor_critic import (
     ACTION_TRANSFORM,
     AsymmetricRecurrentActorCritic,
@@ -63,6 +64,7 @@ class RecurrentPPO:
             eps=1.0e-5,
         )
 
+        env = self.env = DepthFeatureWrapper(env, self.policy.encode_depth_observation)
         self.observation, _ = env.reset()
         self.episode_starts = np.ones(env.num_envs, dtype=bool)
         self.recurrent_state = self.policy.initial_state(env.num_envs)
@@ -107,6 +109,9 @@ class RecurrentPPO:
             "entropy": metrics.get("entropy", float("nan")),
             "approx_kl": metrics.get("approx_kl", float("nan")),
             "clip_fraction": metrics.get("clip_fraction", float("nan")),
+            "optimizer_steps": int(metrics.get("optimizer_steps", 0)),
+            "analytic_kl": metrics.get("analytic_kl", float("nan")),
+            "learning_rate": metrics.get("learning_rate", float("nan")),
             "episodes": self.completed_episodes,
             "success": self.recent_outcomes["success"],
             "collision": self.recent_outcomes["collision"],
@@ -164,6 +169,7 @@ class RecurrentPPO:
         legacy_metrics = {
             "time/fps": fps,
             "train/approx_kl": metrics.get("approx_kl", float("nan")),
+            "train/analytic_kl": metrics.get("analytic_kl", float("nan")),
             "train/clip_fraction": metrics.get("clip_fraction", float("nan")),
             "train/clip_range": self.config.ppo.clip_range,
             "train/clip_range_vf": (
@@ -289,6 +295,8 @@ class RecurrentPPO:
                 value.cpu().numpy(),
                 log_probability.cpu().numpy(),
                 state_before_action,
+                self.policy.action_distribution.mean.detach().cpu().numpy(),
+                self.policy.action_distribution.stddev.detach().cpu().numpy(),
             )
             self.observation = next_observation
             self.episode_starts = done
@@ -308,6 +316,20 @@ class RecurrentPPO:
             )
         self.buffer.compute_returns_and_advantages(last_values, final_dones)
 
+    def _adapt_learning_rate(self, kl: float) -> None:
+        """按 SRU 参考项目的高斯 KL 规则调整学习率，不跳过任何批次。"""
+
+        target = self.config.ppo.target_kl
+        if self.config.ppo.schedule != "adaptive" or target is None:
+            return
+        rate = float(self.optimizer.param_groups[0]["lr"])
+        if kl > 2.0 * target:
+            rate = max(1.0e-5, rate / 1.5)
+        elif 0.0 < kl < target / 2.0:
+            rate = min(1.0e-3, rate * 1.5)
+        for group in self.optimizer.param_groups:
+            group["lr"] = rate
+
     def update(self) -> dict[str, float]:
         """对刚采集的 rollout 执行多轮 PPO 更新。"""
 
@@ -318,9 +340,10 @@ class RecurrentPPO:
             "value_loss": [],
             "entropy": [],
             "approx_kl": [],
+            "analytic_kl": [],
             "clip_fraction": [],
         }
-        stop_early = False
+        optimizer_steps = 0
         for _ in range(self.config.ppo.epochs):
             for batch in self.buffer.iterate_batches(
                 self.config.ppo.batch_size,
@@ -368,6 +391,22 @@ class RecurrentPPO:
                 )
 
                 with torch.no_grad():
+                    # 只在有效位置计算，避免填充标准差为零造成除零；公式与参考一致。
+                    distribution = self.policy.action_distribution
+                    mu = distribution.mean[mask]
+                    sigma = distribution.stddev[mask]
+                    old_mu = batch.old_action_means[mask]
+                    old_sigma = batch.old_action_stds[mask]
+                    analytic_kl = (
+                        (
+                            torch.log(sigma / (old_sigma + 1.0e-7) + 1.0e-7)
+                            + (old_sigma.square() + (old_mu - mu).square())
+                            / (2.0 * sigma.square())
+                            - 0.5
+                        )
+                        .sum(dim=-1)
+                        .mean()
+                    )
                     log_ratio = log_probability - batch.old_log_probabilities
                     approximate_kl = (torch.exp(log_ratio) - 1.0 - log_ratio)[
                         mask
@@ -377,29 +416,26 @@ class RecurrentPPO:
                         .float()
                         .mean()
                     )
+                self._adapt_learning_rate(float(analytic_kl))
+                metrics["loss"].append(float(loss.detach()))
+                metrics["policy_loss"].append(float(policy_loss.detach()))
+                metrics["value_loss"].append(float(value_loss.detach()))
+                metrics["entropy"].append(float(mean_entropy.detach()))
+                metrics["approx_kl"].append(float(approximate_kl))
+                metrics["analytic_kl"].append(float(analytic_kl))
+                metrics["clip_fraction"].append(float(clip_fraction))
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 nn.utils.clip_grad_norm_(
                     self.policy.parameters(), self.config.ppo.max_grad_norm
                 )
                 self.optimizer.step()
-
-                metrics["loss"].append(float(loss.detach()))
-                metrics["policy_loss"].append(float(policy_loss.detach()))
-                metrics["value_loss"].append(float(value_loss.detach()))
-                metrics["entropy"].append(float(mean_entropy.detach()))
-                metrics["approx_kl"].append(float(approximate_kl))
-                metrics["clip_fraction"].append(float(clip_fraction))
-                target_kl = self.config.ppo.target_kl
-                if target_kl is not None and approximate_kl > 1.5 * target_kl:
-                    stop_early = True
-                    break
-            if stop_early:
-                break
+                optimizer_steps += 1
         self.updates += 1
         summary = {
             key: float(np.mean(values)) for key, values in metrics.items() if values
         }
+        summary["optimizer_steps"] = float(optimizer_steps)
         return_variance = float(np.var(self.buffer.returns))
         summary["explained_variance"] = (
             float("nan")
@@ -456,6 +492,9 @@ class RecurrentPPO:
                     progress_bar.write(
                         f"recurrent={self.config.network.recurrent_type} "
                         f"update={self.updates} steps={self.timesteps} "
+                        f"optimizer_steps={metrics['optimizer_steps']:.0f} "
+                        f"lr={metrics['learning_rate']:.3g} "
+                        f"kl={metrics['analytic_kl']:.4f} "
                         f"policy_loss={metrics.get('policy_loss', float('nan')):.4f} "
                         f"value_loss={metrics.get('value_loss', float('nan')):.4f} "
                         f"episodes={self.completed_episodes} outcomes={self.recent_outcomes} "
@@ -531,6 +570,13 @@ class RecurrentPPO:
             ) from error
         if load_optimizer and "optimizer" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer"])
+            if (
+                checkpoint["config"]["ppo"].get("schedule", "fixed")
+                != self.config.ppo.schedule
+            ):
+                # 旧固定学习率运行迁移到新调度时，从本次配置的初始学习率开始。
+                for group in self.optimizer.param_groups:
+                    group["lr"] = self.config.ppo.learning_rate
         self.timesteps = int(checkpoint.get("timesteps", 0))
         self.updates = int(checkpoint.get("updates", 0))
         self.best_mean_reward = float(checkpoint.get("best_mean_reward", float("-inf")))
@@ -546,7 +592,9 @@ class RecurrentPPO:
         )
         if hasattr(self.env, "set_training_progress"):
             self.env.set_training_progress(self.timesteps)
-            # 恢复后开启新回合，清空策略状态和 TOA 历史，不恢复中途物理状态。
-            self.observation, _ = self.env.reset()
-            self.episode_starts = np.ones(self.env.num_envs, dtype=bool)
-            self.recurrent_state = self.policy.initial_state(self.env.num_envs)
+        # 加载权重后重新编码初始观测，避免继续使用加载前的深度特征。
+        self.observation, _ = self.env.reset()
+        self.episode_starts = np.ones(self.env.num_envs, dtype=bool)
+        self.recurrent_state = self.policy.initial_state(self.env.num_envs)
+        self.episode_returns.fill(0)
+        self.episode_lengths.fill(0)

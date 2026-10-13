@@ -1,6 +1,6 @@
 """非对称循环 Actor–Critic。
 
-数据边界在这个文件中非常明确：Actor 只能访问 ``camera`` 和 ``robot_state``；
+数据边界在这个文件中非常明确：Actor 只能访问深度图特征和 ``robot_state``；
 Critic 还能访问训练时特权信息 ``critic_toa``。这比依靠特征提取器继承关系隐式
 区分输入更容易审计。
 """
@@ -141,12 +141,13 @@ class AsymmetricRecurrentActorCritic(nn.Module):
         config.validate()
         self.config = config
         # 冻结的预训练深度编码器。共享时 Actor 与 Critic 复用同一份权重，也只在
-        # 前向里跑一次；不共享时两份权重完全相同且都冻结，仅作消融对照。
+        # 环境包装层中跑一次；保留在模型中用于 checkpoint 和原始图像部署接口。
+        # 不共享时两份权重完全相同且都冻结，仅作消融对照。
         self.depth_encoder = DepthFeatureEncoder(config.depth_encoder_weights)
         self.critic_depth_encoder = (
-            None if config.share_depth_encoder else DepthFeatureEncoder(
-                config.depth_encoder_weights
-            )
+            None
+            if config.share_depth_encoder
+            else DepthFeatureEncoder(config.depth_encoder_weights)
         )
         self.actor_encoder = ActorEncoder(self.robot_state_size, config.feature_dim)
         self.critic_encoder = CriticEncoder(self.robot_state_size, config.feature_dim)
@@ -219,14 +220,36 @@ class AsymmetricRecurrentActorCritic(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """返回 Actor 与 Critic 各自使用的深度特征；共享时是同一个张量。"""
 
+        if "depth_features" in observation:
+            actor_depth = observation["depth_features"]
+            critic_depth = (
+                actor_depth
+                if self.critic_depth_encoder is None
+                else observation["critic_depth_features"]
+            )
+            return actor_depth, critic_depth
         actor_depth = self.depth_encoder(observation["camera"])
         if self.critic_depth_encoder is None:
             return actor_depth, actor_depth
         return actor_depth, self.critic_depth_encoder(observation["camera"])
 
+    @torch.no_grad()
+    def encode_depth_observation(
+        self, observation: Observation
+    ) -> dict[str, torch.Tensor]:
+        """在环境边界编码深度图；返回只含特征的观测，不缓存可训练的状态投影。"""
+
+        result = dict(observation)
+        camera = result.pop("camera").to(self.device)
+        result["depth_features"] = self.depth_encoder(camera)
+        if self.critic_depth_encoder is not None:
+            result["critic_depth_features"] = self.critic_depth_encoder(camera)
+        return result
+
     def _distribution(self, latent: torch.Tensor) -> Normal:
         mean = self.action_mean(self.actor_mlp(latent))
-        return Normal(mean, self.log_std.exp().expand_as(mean))
+        self.action_distribution = Normal(mean, self.log_std.exp().expand_as(mean))
+        return self.action_distribution
 
     @torch.no_grad()
     def act_actor(
@@ -237,7 +260,11 @@ class AsymmetricRecurrentActorCritic(nn.Module):
     ) -> tuple[torch.Tensor, RecurrentState]:
         """确定性评估仅计算 Actor，不读取 Critic 的特权观测。"""
         sequence = self._with_time_dimension(observation)
-        depth_feature = self.depth_encoder(sequence["camera"])
+        depth_feature = (
+            sequence["depth_features"]
+            if "depth_features" in sequence
+            else self.depth_encoder(sequence["camera"])
+        )
         features = self.actor_encoder(sequence, depth_feature)
         output, actor_state = self.actor_recurrent(
             features, state.actor, episode_starts.unsqueeze(0)
@@ -281,6 +308,8 @@ class AsymmetricRecurrentActorCritic(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """评估 ``[时间, 序列, ...]`` 形式的训练批次。"""
 
+        if "depth_features" not in observation:
+            raise ValueError("PPO 训练批次必须使用环境侧编码的 depth_features")
         actor_depth, critic_depth = self._depth_features(observation)
         actor_features = self.actor_encoder(observation, actor_depth)
         critic_features = self.critic_encoder(observation, critic_depth)

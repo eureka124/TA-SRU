@@ -146,7 +146,8 @@ def main() -> int:
 
         stage = "创建策略并加载 checkpoint"
         policy = load_evaluation_policy(checkpoint, args.network_device or args.device)
-        # 同步旧流程的课程进度，用于评估回报中的接触惩罚系数。
+        env.set_observation_transform(policy.encode_depth_observation)
+        # 同步 checkpoint 的累计训练步数；奖励不再依赖训练进度。
         env.set_training_progress(int(checkpoint.get("timesteps", 0)))
         del checkpoint
         observation, _ = env.reset()
@@ -185,7 +186,7 @@ def main() -> int:
             tensor_observation = {
                 key: torch.as_tensor(value, dtype=torch.float32, device=policy.device)
                 for key, value in observation.items()
-                if key in ("camera", "robot_state")
+                if key in ("depth_features", "robot_state")
             }
             with torch.inference_mode():
                 action, state = policy.act_actor(

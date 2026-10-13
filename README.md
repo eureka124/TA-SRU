@@ -242,9 +242,11 @@ checkpoint 保存场景/生成器/TOA 版本、两个地图池及目标摘要和
 
 ### 训练课程与指标
 
+PPO 使用 SRU 参考导航项目的自适应学习率，不再因 KL 提前停止。默认初始学习率 `1e-3`、`schedule=adaptive`、`target_kl=0.01`（对应参考项目的 `desired_kl`）。每个 minibatch 更新前，用新旧高斯分布参数计算解析 KL：超过 `0.02` 时学习率除以 `1.5`（最低 `1e-5`），处于 `(0, 0.005)` 时乘以 `1.5`（最高 `1e-3`），其他情况不变；填充位置不参与 KL 计算。`schedule=fixed` 或 `target_kl=None` 可关闭调节。每轮均执行配置的全部 epochs；终端、CSV 和 TensorBoard 记录 `optimizer_steps`、`analytic_kl` 和轮末 `learning_rate`，原 `approx_kl` 仍保留作对照。恢复自适应 checkpoint 时沿用优化器保存的学习率；旧固定学习率 checkpoint 切换调度时使用本次配置的初始学习率。
+
 地图池在启动时按种子生成，默认训练 64 张、评估 16 张，每图 8 个目标。重置时随机选择训练地图与目标，并从同一可达分量采样合法起点，初始朝向目标、速度清零。目标坐标不抖动。场景只包含平地和墙体，碰撞与相机使用同一静态网格。
 
-训练和评估的碰撞力阈值全程固定为 0.1 N，不随训练进度变化。接触惩罚权重仍在前 40% 训练进度逐渐增至完整强度，接触力归一化使用固定阈值。恢复旧 checkpoint 时将碰撞阈值统一迁移到 0.1 N，并忽略已废弃的最小碰撞阈值字段。
+训练和评估的碰撞力阈值全程固定为 0.1 N，接触惩罚从第一步起使用完整强度，不随训练进度变化。接触力归一化使用固定阈值。所有奖励项加总后统一乘以 0.01：默认成功奖励为 +3，达到碰撞阈值时的接触惩罚为 −1，TOA 进度项的有效权重为 5。日志中的 `contact_penalty_scale` 保留为常数 1。恢复旧 checkpoint 时将碰撞阈值统一迁移到 0.1 N，并忽略已废弃的最小碰撞阈值和接触惩罚渐增字段；旧模型也使用新的奖励定义，其 Critic 和优化器状态需要适应新尺度，历史回报和最佳回报不可直接与新回报比较。
 
 接触检测和接触惩罚都取当前策略步全部物理子步、全部机体部件的最大接触力，不再只看最后一个子步。历史窗口随 `control_decimation` 调整，避免漏掉碰撞后弹开的短暂接触，也避免重复计入上一策略步。回合重置会清零当前及历史动作缓存。
 
@@ -474,11 +476,13 @@ Isaac Sim / PhysX → NavigationEnv → IsaacLabWrapper → PPO
 
 结构复刻自参考工程（导航侧 `mdp/depth_utils/depth_noise_encoder.py`，训练侧 `sru-depth-pretraining/network/encoder.py`），权重来自 `vae_pretrain_new.pth`。输入是**原始米制深度**而不是归一化图像，`depth_min_distance`（默认 0.25 m）与 `depth_max_distance`（默认 10 m）之外的读数一律置 0，因此 0 表示无效。注意相机截断距离恰好等于 `depth_max_distance`，无返回的射线取值正好等于上限，所以量程判断用的是 `>=` 而不是 `>`。
 
-编码器在构造时加载权重，随后整体冻结：恒为 eval（BatchNorm 使用预训练运行统计，策略整体的 `train()` 不会把它切回训练态）、参数不参与反向、不在优化器参数组里。Actor 与 Critic **共用**同一个编码器（`share_depth_encoder=True`），每个策略步只前向一次；置 `False` 则各自持有一份完全相同且都冻结的副本，仅作消融对照。深度特征与 `robot_state`（以及 Critic 的 TOA 特征）逐元素相加后送入循环单元，因此 `feature_dim` 必须等于编码器的展平输出，即 `64 × ceil(depth_height/8) × ceil(depth_width/8)`：默认 48×64 对应 **3072**。`TrainConfig.validate()` 会校验这个等式，`depth_height` 改了而 `feature_dim` 没跟会在启动时报错。
+编码器在构造时加载权重，随后整体冻结：恒为 eval（BatchNorm 使用预训练运行统计，策略整体的 `train()` 不会把它切回训练态）、参数不参与反向、不在优化器参数组里。环境包装层在观测传回 CPU 前执行编码，rollout buffer 保存 `depth_features`，不保存原始 `camera`；采样时的策略前向、超时 bootstrap 和所有 PPO minibatch 都复用这些特征。自动重置前的终止观测单独按结束环境批量编码，避免误用新回合观测。Actor 与 Critic 默认复用同一份特征（`share_depth_encoder=True`）；置 `False` 时分别编码并额外保存 `critic_depth_features`。状态投影、TOA 编码器和循环网络仍在每次更新时训练，不缓存它们的输出。深度特征与状态、TOA 特征逐元素相加后送入循环单元，`feature_dim` 仍为 `64 × ceil(depth_height/8) × ceil(depth_width/8)`，默认 **3072**，由配置校验。
+
+冻结编码器仍随模型保存，环境包装层引用同一个实例，不额外复制权重；仿真和网络设备不同时，将深度图传到网络设备编码。此次特征缓存调整不改变 checkpoint 权重键或导出格式：已有 RegNetX checkpoint 可以继续加载，加载后重新编码初始观测；部署端仍可输入米制 `camera`，或预先编码后向 Actor 传入 `depth_features`。CPU buffer 的存储策略及循环输入维度不变，本次优化主要减少重复前向计算，不保证 buffer 内存下降。
 
 当前规模：编码器 5,323,456 参数（另加均值头里未被前向使用的 logvar 分支 41,152，为满足 `strict=True` 加载而保留），整个模型约 1,520 万参数，其中约 984 万可训练。编码器单图约 71.6 MFLOPs（48×64），前向按 `FORWARD_CHUNK = 1024` 分批以限制激活峰值。
 
-**旧 checkpoint 无法恢复或评估**：编码器键名从 `actor_encoder.depth.*` 变成 `depth_encoder.*`，且深度观测语义从 [-1, 1] 归一化改为米制深度。加载旧 checkpoint 会在 `load_state_dict` 处报明确的错误，导出产物也升到 `version: 2`。
+**早期小 CNN checkpoint 无法恢复或评估**：编码器键名从 `actor_encoder.depth.*` 变成 `depth_encoder.*`，且深度观测语义从 [-1, 1] 归一化改为米制深度。加载这类 checkpoint 会在 `load_state_dict` 处报明确的错误，导出产物也升到 `version: 2`；已经采用 RegNetX 的 checkpoint 不受此次特征缓存调整影响。
 
 Lee 控制器在机体系力矩中加入 `Ω × (JΩ)`，补偿刚体方程的陀螺耦合。接触历史检测及控制器修复会改变旧 checkpoint 的仿真轨迹和结局；与修复前的评估结果比较时，请同时记录代码版本。
 

@@ -10,8 +10,9 @@ from ta_sru.envs.maze import scene_version
 def configure_evaluation(values: dict) -> dict:
     """只覆盖本次评估配置，使用评估地图池和固定碰撞阈值。"""
     values = dict(values)
-    # 兼容仍包含阈值课程字段的旧 checkpoint。
+    # 兼容仍包含碰撞课程字段的旧 checkpoint。
     values.pop("minimum_contact_force_threshold", None)
+    values.pop("contact_penalty_ramp_fraction", None)
     if values.get("toa_normalization_max") is None:
         raise ValueError("DFS 评估需要 checkpoint 中的训练 TOA 观测量程")
     values.update(

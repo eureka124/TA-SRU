@@ -102,8 +102,8 @@ class EnvConfig:
     # 动作三个分量的上界，依次为前向速度、侧向速度和偏航角速度。
     action_high: tuple[float, float, float] = (2.0, 0.5, 1.0471975511965976)
 
-    # 奖励系数按每个策略步计算。
-    # DirectRLEnv 不会像 RewardManager 一样再乘 policy_dt，因此这里直接保存最终系数。
+    # 奖励系数按每个策略步计算，各项加总后统一乘以 0.01。
+    # DirectRLEnv 不会像 RewardManager 一样再乘 policy_dt，这里保存总奖励缩放前的系数。
     # 朝目标方向速度奖励的权重。
     goal_velocity_weight: float = 0.0
     # 按本回合起点 TOA 归一化后的进度奖励权重。
@@ -118,9 +118,7 @@ class EnvConfig:
     goal_threshold: float = 0.4
     # 训练全程固定的碰撞判定力阈值，单位为牛顿。
     collision_force_threshold: float = 0.1
-    # 接触惩罚完成渐增所占的总训练步数比例。
-    contact_penalty_ramp_fraction: float = 0.4
-    # 环境课程计算进度时采用的总 transition 数，由 TrainConfig 同步。
+    # 计划训练的总 transition 数，由 TrainConfig 同步，保留用于配置兼容。
     total_training_steps: int = 70_000_000
 
     @property
@@ -209,8 +207,6 @@ class EnvConfig:
             raise ValueError("toa_normalization_max 必须为有限正数或 None")
         if any(low >= high for low, high in zip(self.action_low, self.action_high)):
             raise ValueError("每个动作下界都必须小于上界")
-        if not 0.0 < self.contact_penalty_ramp_fraction <= 1.0:
-            raise ValueError("contact_penalty_ramp_fraction 必须位于 (0, 1]")
 
 
 @dataclass
@@ -266,8 +262,9 @@ class PPOConfig:
     gamma: float = 0.95
     # 广义优势估计的偏差与方差权衡系数。
     gae_lambda: float = 0.95
-    # Adam 优化器的学习率。
-    learning_rate: float = 3.0e-4
+    # 与 SRU 参考项目一致的初始学习率及调度方式。
+    learning_rate: float = 1.0e-3
+    schedule: str = "adaptive"
     # PPO 策略概率比的裁剪范围。
     clip_range: float = 0.2
     # 价值函数更新的裁剪范围；为 None 时不裁剪。
@@ -280,10 +277,19 @@ class PPOConfig:
     max_grad_norm: float = 1.0
     # 是否在每个训练批次内标准化优势值。
     normalize_advantage: bool = True
-    # 提前停止当前 PPO 更新的目标 KL 散度；为 None 时禁用。
-    target_kl: float | None = 0.02
+    # 自适应学习率的目标 KL（参考项目的 desired_kl）；为 None 时不调节。
+    # 超过目标两倍时除以 1.5，低于目标一半且大于零时乘以 1.5；不提前停止。
+    target_kl: float | None = 0.01
 
     def validate(self, num_envs: int) -> None:
+        if self.schedule not in ("adaptive", "fixed"):
+            raise ValueError("schedule 必须是 adaptive 或 fixed")
+        if not isfinite(self.learning_rate) or self.learning_rate <= 0:
+            raise ValueError("learning_rate 必须为有限正数")
+        if self.target_kl is not None and (
+            not isfinite(self.target_kl) or self.target_kl <= 0
+        ):
+            raise ValueError("target_kl 必须为有限正数或 None")
         if self.rollout_steps <= 0 or self.batch_size <= 0:
             raise ValueError("rollout_steps 和 batch_size 必须为正数")
         if self.recurrent_sequence_length <= 0:
@@ -322,7 +328,7 @@ class TrainConfig:
             raise ValueError("total_timesteps 必须为正数")
         if self.log_interval <= 0 or self.checkpoint_interval <= 0:
             raise ValueError("日志和 checkpoint 间隔必须为正数")
-        # 环境的接触课程均以训练器实际使用的总 transition 数为时间轴。
+        # 环境配置中的计划步数与训练器保持一致。
         self.env.total_training_steps = self.total_timesteps
         self.env.validate()
         self.network.validate()

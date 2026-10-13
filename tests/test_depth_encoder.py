@@ -6,8 +6,10 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
+import numpy as np
 import torch
 
 from ta_sru.config import EnvConfig, NetworkConfig, TrainConfig
@@ -16,6 +18,7 @@ from ta_sru.envs.depth import (
     mask_invalid_depth,
     sanitize_depth,
 )
+from ta_sru.envs.wrappers import DepthFeatureWrapper, IsaacLabWrapper
 from ta_sru.models.actor_critic import AsymmetricRecurrentActorCritic
 from ta_sru.models.depth_encoder import (
     DepthFeatureEncoder,
@@ -39,12 +42,107 @@ def _small_network() -> NetworkConfig:
 
 
 def _pretrained_state() -> dict[str, torch.Tensor]:
-    return torch.load(
-        default_weights_path(), map_location="cpu", weights_only=True
-    )
+    return torch.load(default_weights_path(), map_location="cpu", weights_only=True)
 
 
 class DepthEncoderTests(unittest.TestCase):
+    def test_cached_features_match_raw_policy_and_train_without_encoder(self) -> None:
+        for shared in (True, False):
+            with self.subTest(shared=shared):
+                model = AsymmetricRecurrentActorCritic(
+                    replace(_small_network(), share_depth_encoder=shared)
+                ).eval()
+                observation = {
+                    "camera": torch.rand(2, 1, 12, 16),
+                    "robot_state": torch.rand(2, 8),
+                    "critic_toa": torch.rand(2, 1, 16, 16),
+                }
+                starts = torch.tensor([True, False])
+                state = model.initial_state(2)
+                expected = model.act(observation, state, starts, deterministic=True)
+                encoded = model.encode_depth_observation(observation)
+                self.assertNotIn("camera", encoded)
+                self.assertFalse(encoded["depth_features"].requires_grad)
+                if not shared:
+                    self.assertIn("critic_depth_features", encoded)
+                model.train()
+                with mock.patch.object(
+                    DepthFeatureEncoder,
+                    "forward",
+                    side_effect=AssertionError("缓存路径不能再次编码"),
+                ):
+                    actual = model.act(encoded, state, starts, deterministic=True)
+                    for before, after in zip(expected[:3], actual[:3]):
+                        torch.testing.assert_close(before, after)
+                    actor_action, _ = model.act_actor(
+                        {
+                            key: encoded[key]
+                            for key in ("depth_features", "robot_state")
+                        },
+                        state,
+                        starts,
+                    )
+                    torch.testing.assert_close(actor_action, expected[0])
+                    torch.testing.assert_close(
+                        model.predict_value(encoded, state.critic, starts), expected[1]
+                    )
+                    values, log_prob, entropy = model.evaluate_sequences(
+                        {key: value.unsqueeze(0) for key, value in encoded.items()},
+                        expected[0].unsqueeze(0),
+                        state,
+                        starts.unsqueeze(0),
+                    )
+                    torch.testing.assert_close(log_prob[0], expected[2])
+                    (values.sum() + log_prob.sum() - entropy.sum()).backward()
+                self.assertIsNotNone(model.actor_encoder.robot_state.weight.grad)
+                self.assertIsNotNone(model.critic_encoder.robot_state.weight.grad)
+                self.assertTrue(
+                    all(p.grad is None for p in model.depth_encoder.parameters())
+                )
+
+    def test_native_wrapper_encodes_terminal_before_reset_in_one_batch(self) -> None:
+        def observation(value):
+            return {
+                "camera": torch.full((2, 1, 2, 2), value),
+                "robot_state": torch.zeros(2, 8),
+                "critic_toa": torch.zeros(2, 1, 16, 16),
+            }
+
+        raw = SimpleNamespace(
+            num_envs=2,
+            device="cpu",
+            task=EnvConfig(),
+            reset=lambda: ({"policy": observation(1.0)}, {}),
+            step=lambda actions: (
+                {"policy": observation(2.0)},
+                torch.ones(2),
+                torch.tensor([False, False]),
+                torch.tensor([False, True]),
+                {
+                    "terminal_observation": observation(9.0),
+                    "start_xy": torch.zeros(2, 2),
+                },
+            ),
+        )
+        encoded_sizes = []
+
+        def transform(obs):
+            encoded_sizes.append(len(obs["camera"]))
+            return {
+                **{key: value for key, value in obs.items() if key != "camera"},
+                "depth_features": obs["camera"].flatten(1),
+            }
+
+        env = DepthFeatureWrapper(IsaacLabWrapper(raw), transform)
+        initial, _ = env.reset()
+        self.assertNotIn("camera", initial)
+        following, _, _, _, infos = env.step(np.zeros((2, 3)))
+        np.testing.assert_array_equal(following["depth_features"], 2.0)
+        np.testing.assert_array_equal(
+            infos[1]["terminal_observation"]["depth_features"], 9.0
+        )
+        self.assertEqual(encoded_sizes, [2, 2, 1])
+
     def test_module_keys_match_pretrained_file(self) -> None:
         """键集必须与预训练文件逐字对应。
 
@@ -112,7 +210,9 @@ class DepthEncoderTests(unittest.TestCase):
         encoder = DepthFeatureEncoder()
         with tempfile.TemporaryDirectory() as directory:
             pointer = Path(directory) / "pointer.pth"
-            pointer.write_bytes(b"version https://git-lfs.github.com/spec/v1\noid sha256:x\n")
+            pointer.write_bytes(
+                b"version https://git-lfs.github.com/spec/v1\noid sha256:x\n"
+            )
             with self.assertRaisesRegex(ValueError, "git lfs pull"):
                 load_pretrained_weights(encoder, pointer)
 
@@ -133,9 +233,7 @@ class DepthEncoderTests(unittest.TestCase):
         separate = AsymmetricRecurrentActorCritic(
             replace(_small_network(), share_depth_encoder=False)
         )
-        frozen = sum(
-            p.numel() for p in shared.parameters() if not p.requires_grad
-        )
+        frozen = sum(p.numel() for p in shared.parameters() if not p.requires_grad)
         self.assertEqual(
             sum(p.numel() for p in separate.parameters() if not p.requires_grad),
             2 * frozen,

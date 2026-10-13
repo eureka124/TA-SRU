@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator
+from itertools import pairwise
 
 import numpy as np
 import torch
@@ -17,6 +18,8 @@ class SequenceBatch:
     actions: torch.Tensor
     old_values: torch.Tensor
     old_log_probabilities: torch.Tensor
+    old_action_means: torch.Tensor
+    old_action_stds: torch.Tensor
     advantages: torch.Tensor
     returns: torch.Tensor
     episode_starts: torch.Tensor
@@ -59,6 +62,8 @@ class CpuRolloutBuffer:
             for key, value in observation_example.items()
         }
         self.actions = np.empty((rollout_steps, num_envs, 3), dtype=np.float32)
+        self.action_means = np.empty_like(self.actions)
+        self.action_stds = np.empty_like(self.actions)
         scalar_shape = (rollout_steps, num_envs)
         self.rewards = np.empty(scalar_shape, dtype=np.float32)
         self.episode_starts = np.empty(scalar_shape, dtype=bool)
@@ -94,6 +99,8 @@ class CpuRolloutBuffer:
         value: np.ndarray,
         log_probability: np.ndarray,
         recurrent_state: RecurrentState,
+        action_mean: np.ndarray,
+        action_std: np.ndarray,
     ) -> None:
         if self.full:
             raise RuntimeError("rollout buffer 已满")
@@ -101,6 +108,8 @@ class CpuRolloutBuffer:
         for key, array in observation.items():
             self.observations[key][index] = np.asarray(array, dtype=np.float32)
         self.actions[index] = action
+        self.action_means[index] = action_mean
+        self.action_stds[index] = action_std
         self.rewards[index] = reward
         self.episode_starts[index] = episode_start
         self.values[index] = value
@@ -149,7 +158,7 @@ class CpuRolloutBuffer:
                 for index in np.flatnonzero(self.episode_starts[1:, env_id]) + 1
             )
             boundaries.append(self.rollout_steps)
-            for episode_start, episode_end in zip(boundaries[:-1], boundaries[1:]):
+            for episode_start, episode_end in pairwise(boundaries):
                 for start in range(episode_start, episode_end, maximum_length):
                     sequences.append(
                         _Sequence(
@@ -228,6 +237,8 @@ class CpuRolloutBuffer:
             old_log_probabilities=torch.as_tensor(
                 padded(self.log_probabilities), device=device
             ),
+            old_action_means=torch.as_tensor(padded(self.action_means), device=device),
+            old_action_stds=torch.as_tensor(padded(self.action_stds), device=device),
             advantages=torch.as_tensor(padded(self.advantages), device=device),
             returns=torch.as_tensor(padded(self.returns), device=device),
             episode_starts=torch.as_tensor(padded(self.episode_starts), device=device),
@@ -240,6 +251,8 @@ class CpuRolloutBuffer:
         arrays = [
             *self.observations.values(),
             self.actions,
+            self.action_means,
+            self.action_stds,
             self.rewards,
             self.episode_starts,
             self.values,

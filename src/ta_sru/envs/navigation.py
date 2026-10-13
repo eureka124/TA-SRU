@@ -255,7 +255,8 @@ class NavigationEnv(DirectRLEnv):
         self.episode_start_toa = torch.ones(self.num_envs, device=self.device)
         self.previous_toa = torch.full((self.num_envs,), torch.nan, device=self.device)
         self.training_step_offset = 0
-        self.training_curriculum_contact_scale = 0.0
+        # 保留旧日志接口，接触惩罚全程使用完整强度。
+        self.training_curriculum_contact_scale = 1.0
         self._create_toa_tensors()
         if self.task.debug:
             self._trajectory_history = torch.zeros(
@@ -541,25 +542,12 @@ class NavigationEnv(DirectRLEnv):
         return max(self.training_step_offset + simulated_steps, 0)
 
     def set_training_progress(self, elapsed_steps: int) -> None:
-        """同步恢复训练后的课程进度，而不修改 Isaac Lab 内部计数器。"""
+        """同步恢复训练后的累计步数，而不修改 Isaac Lab 内部计数器。"""
 
         if elapsed_steps < 0:
             raise ValueError(f"elapsed_steps 不能为负数，实际为 {elapsed_steps}")
         simulated_steps = int(self.common_step_counter * self.num_envs)
         self.training_step_offset = int(elapsed_steps) - simulated_steps
-
-    def _contact_penalty_scale(self) -> float:
-        """返回接触惩罚渐增比例，碰撞判定阈值始终固定。"""
-
-        curriculum = min(
-            float(self.training_elapsed_steps)
-            / (
-                self.task.total_training_steps * self.task.contact_penalty_ramp_fraction
-            ),
-            1.0,
-        )
-        self.training_curriculum_contact_scale = curriculum
-        return curriculum
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         distance = torch.linalg.vector_norm(
@@ -600,7 +588,7 @@ class NavigationEnv(DirectRLEnv):
         return terminated, time_out
 
     def _get_rewards(self) -> torch.Tensor:
-        """计算按起点 TOA 归一化的逐策略步奖励。"""
+        """计算按起点 TOA 归一化的逐策略步奖励，并将总奖励缩放为 0.01 倍。"""
 
         goal_delta = self.goal_positions[:, :2] - self.robot.data.root_pos_w[:, :2]
         goal_direction = goal_delta / (
@@ -621,12 +609,11 @@ class NavigationEnv(DirectRLEnv):
         # 起点为本回合固定分母；无效采样切断差分历史，成功时不补发剩余进度。
         self.previous_toa.copy_(current_toa.detach())
 
-        curriculum = self._contact_penalty_scale()
         contact_penalty = (
             self._contact_force() / self.task.collision_force_threshold
-        ).clamp(max=1.0) * curriculum
+        ).clamp(max=1.0)
         success = self.extras["success"].float()
-        return (
+        return 0.01 * (
             self.task.goal_velocity_weight * goal_velocity
             + self.task.toa_progress_weight * toa_progress
             + self.task.action_smoothness_weight * smoothness

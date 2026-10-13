@@ -26,7 +26,11 @@ from ta_sru.envs.toa import (
     obstacle_clearance,
 )
 from ta_sru.envs.toa_sampling import normalized_progress, sample_toa
-from ta_sru.evaluation import EvaluationStats, MapQuotaScheduler, require_scene_checkpoint
+from ta_sru.evaluation import (
+    EvaluationStats,
+    MapQuotaScheduler,
+    require_scene_checkpoint,
+)
 from ta_sru.scene_config import training_env_config, validate_resume_config
 
 
@@ -246,9 +250,11 @@ class DfsTests(unittest.TestCase):
     def test_resume_ignores_removed_threshold_curriculum_field(self):
         saved = asdict(self.config(collision_force_threshold=12.0))
         saved["minimum_contact_force_threshold"] = 0.1
+        saved["contact_penalty_ramp_fraction"] = 0.4
         restored = training_env_config(saved, {})
         self.assertEqual(restored.collision_force_threshold, 0.1)
         self.assertNotIn("minimum_contact_force_threshold", asdict(restored))
+        self.assertNotIn("contact_penalty_ramp_fraction", asdict(restored))
         self.assertIn("minimum_contact_force_threshold", saved)
         validate_resume_config(saved, restored)
 

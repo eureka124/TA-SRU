@@ -10,11 +10,11 @@ from pathlib import Path
 
 from torch.utils.tensorboard import SummaryWriter
 
-
 LEGACY_TAGS = {
     "policy_loss": "train/policy_gradient_loss",
     "value_loss": "train/value_loss",
     "approx_kl": "train/approx_kl",
+    "analytic_kl": "train/analytic_kl",
     "clip_fraction": "train/clip_fraction",
 }
 
@@ -110,6 +110,11 @@ def main() -> None:
                 ("learning_rate", "train/learning_rate"),
             ):
                 value = ppo_config.get(config_name)
+                if config_name == "learning_rate":
+                    # 自适应调度必须使用当轮学习率，旧日志缺少该列时才回退到配置。
+                    recorded_rate = optional_float(row, "learning_rate")
+                    if recorded_rate is not None:
+                        value = recorded_rate
                 if isinstance(value, (int, float)):
                     writer.add_scalar(tag, value, step)
     finally:

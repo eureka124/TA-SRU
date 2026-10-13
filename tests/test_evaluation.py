@@ -91,10 +91,13 @@ class EvaluationTests(unittest.TestCase):
             "toa_normalization_max": 125.0,
             "collision_force_threshold": 50.0,
             "minimum_contact_force_threshold": 0.1,
+            "contact_penalty_ramp_fraction": 0.4,
         }
         config = EnvConfig(**configure_evaluation(original))
         self.assertEqual(config.collision_force_threshold, 0.1)
         self.assertIn("minimum_contact_force_threshold", original)
+        self.assertNotIn("contact_penalty_ramp_fraction", asdict(config))
+        self.assertIn("contact_penalty_ramp_fraction", original)
 
     def test_outcome_precedence(self):
         self.assertEqual(

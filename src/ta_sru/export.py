@@ -2,17 +2,17 @@
 
 from dataclasses import asdict
 from pathlib import Path
+
 import torch
+
 from ta_sru.config import NetworkConfig
 from ta_sru.models.actor_critic import (
     AsymmetricRecurrentActorCritic,
     require_supported_action_transform,
 )
 
-# depth_encoder. 是 Actor 与 Critic 共享的冻结编码器；非共享时的
-# critic_depth_encoder. 不会命中这个前缀。
+# Actor 的独立 CNN 已包含在 actor_encoder 中，不导出 Critic 分支。
 ACTOR_PREFIXES = (
-    "depth_encoder.",
     "actor_encoder.",
     "actor_recurrent.",
     "actor_mlp.",
@@ -30,16 +30,15 @@ ENV_KEYS = (
     "action_low",
     "action_high",
 )
-# 版本 2：深度输入由 [-1, 1] 归一化改为米制深度（0 表示无效），编码器改为
-# RegNetX-400MF + FPN + VAE 均值头。部署侧必须按新语义构造 camera 输入。
-ARTIFACT_VERSION = 2
+# 版本 3：恢复 tutorial 可训练小 CNN 和 192 维融合；深度输入仍为米制深度。
+ARTIFACT_VERSION = 3
 
 
 def export_actor(checkpoint_path, output_path):
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     require_supported_action_transform(checkpoint.get("action_transform"))
     config = checkpoint["config"]
-    network = NetworkConfig(**config["network"])
+    network = NetworkConfig.from_checkpoint(config["network"])
     network.validate()
     algorithm = config.get("algorithm", "recurrent_ppo")
     if (algorithm == "ppo") != (network.recurrent_type == "none"):

@@ -70,7 +70,7 @@ def load_pretrained_weights(module: nn.Module, path: Path) -> None:
     if not path.is_file():
         raise FileNotFoundError(
             f"深度编码器预训练权重不存在：{path}。"
-            f"仓库默认权重位于 {DEFAULT_WEIGHTS}，配置项为 NetworkConfig.depth_encoder_weights。"
+            f"仓库默认权重位于 {DEFAULT_WEIGHTS}，可通过历史 DepthFeatureEncoder 的 weights 参数指定。"
         )
     # Git LFS 指针文件同样是"存在"的，但内容不是权重；这里提前给出可操作的报错。
     if path.stat().st_size < 1024:

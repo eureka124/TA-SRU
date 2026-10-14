@@ -21,7 +21,7 @@ Python 最低版本由 `pyproject.toml` 声明为 3.10；实际还需满足所�
 
 USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指针文件，需要先安装 Git LFS 并执行 `git lfs pull`，取得真实模型文件。
 
-深度编码器还需要 `torchvision`（`pyproject.toml` 已声明，要求 0.13 以上，因为 FPN 的键名带一层 `Conv2dNormActivation` 嵌套）。编码器的预训练权重 `assets/depth_encoder/vae_pretrain_new.pth` 是普通 Git 文件（**没有**配 LFS，避免出现指针文件导致 `torch.load` 失败），大小 21.7 MB，sha256 为 `65bc47e9173b5256385bc2c24280764f54e404dc1017f3e927fda85d21e29e4a`，可用 `sha256sum` 核对。
+当前默认网络恢复为 `~/tutorial` 的可训练小 CNN，不加载深度编码器预训练权重。仓库保留的 RegNetX 模块与 `assets/depth_encoder/vae_pretrain_new.pth` 仅用于历史实现对照，当前训练、评估和导出均不使用它们。
 
 ## 2. 文件与目录用途
 
@@ -54,7 +54,7 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 | `src/ta_sru/envs/toa.py` | 用 FMM 构建 Time of Arrival（TOA）地图，进行采样、局部裁剪和调试图输出。 |
 | `src/ta_sru/envs/depth.py` | 深度观测预处理：非有限值替换、4×4 最小池化下采样、量程外置 0。 |
 | `src/ta_sru/models/actor_critic.py` | 非对称 Actor-Critic：Actor 使用深度图和机体状态，Critic 额外使用局部 TOA。 |
-| `src/ta_sru/models/depth_encoder.py` | 冻结的深度编码器：RegNetX-400MF + FPN + VAE 均值头，加载并校验预训练权重。 |
+| `src/ta_sru/models/depth_encoder.py` | 历史 RegNetX 冻结编码器，保留作对照，当前默认网络不调用。 |
 | `src/ta_sru/models/recurrent.py` | SRU 系列、PyTorch LSTM 及普通 PPO 的前馈模块，包含循环状态重置。 |
 | `src/ta_sru/models/hummingbird.py` | 飞机参数定义、四元数运算及动力学辅助函数。 |
 | `src/ta_sru/models/hummingbird_asset.py` | 将本地 Hummingbird USD 资产配置为 Isaac Lab 飞行器。 |
@@ -73,7 +73,7 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 | `assets/hummingbird/hummingbird.usd` | 无人机仿真模型资产。 |
 | `assets/hummingbird/hummingbird.yaml` | 无人机物理及控制参数。 |
 | `assets/depth_encoder/vae_pretrain_new.pth` | 深度编码器的预训练权重（22.7 MB，普通 Git 文件）。 |
-| `tests/test_depth_encoder.py` | 编码器键名与逐位权重、输出维度、冻结不变量、深度预处理及配置自洽校验。 |
+| `tests/test_depth_encoder.py` | tutorial CNN 结构与梯度、历史编码器和深度预处理检查。 |
 | `tests/test_evaluation.py` | 检查独立评估池配置、结局优先级和每张地图配额。 |
 | `tests/test_playback.py` | 检查原始深度、视频编码、并行回合隔离及回放保存上限。 |
 | `tests/test_dfs.py` | DFS 树结构、几何、缓存、点目标 TOA、归一化奖励及恢复校验。 |
@@ -461,29 +461,23 @@ Isaac Sim / PhysX → NavigationEnv → IsaacLabWrapper → PPO
 
 默认物理频率为 120 Hz，每 5 个物理步执行一次策略决策，即 24 Hz。修改地图生成看 `envs/maze.py`，修改奖励/终止看 `envs/navigation.py`，修改网络看 `models/actor_critic.py`、`models/recurrent.py`、`models/depth_encoder.py` 和 `NetworkConfig`。
 
-### 深度编码器
+### 网络结构（对齐 tutorial）
 
-深度图先经过 `envs/depth.py` 预处理，再送进冻结的预训练编码器：
+默认结构对齐 `~/tutorial` 的 `ActorFeaturesExtractor`、`CriticFeaturesExtractor` 和 `sb3_ppo_cfg.yaml`：
 
-```text
-相机 distance_to_image_plane (256×192)
-  → 非有限值替换为 depth_invalid_distance
-  → 4×4 最小池化（取块内最近表面）
-  → 量程外与无效读数置 0，其余保留米数     # 48×64，0 表示"无效"
-  → RegNetX-400MF 主干 + FPN（只取最高分辨率的 feat1）
-  → VAE 均值头                             # 64×6×8
-  → 展平                                   # 3072
-```
+| 分支 | 卷积结构 | 池化与投影 |
+| --- | --- | --- |
+| Actor 深度图 | `1→8`（2×2）、`8→16`（3×3）、`16→32`（3×3） | 池化到 2×3，展平 192，线性层输出 192 |
+| Critic 深度图 | `1→8`（2×2）、`8→16`（3×3） | 池化到 2×3，展平 96，线性层输出 192 |
+| Critic TOA | `1→8`（2×2）、`8→16`（3×3） | 池化到 2×3，展平 96，线性层输出 192 |
 
-结构复刻自参考工程（导航侧 `mdp/depth_utils/depth_noise_encoder.py`，训练侧 `sru-depth-pretraining/network/encoder.py`），权重来自 `vae_pretrain_new.pth`。输入是**原始米制深度**而不是归一化图像，`depth_min_distance`（默认 0.25 m）与 `depth_max_distance`（默认 10 m）之外的读数一律置 0，因此 0 表示无效。注意相机截断距离恰好等于 `depth_max_distance`，无返回的射线取值正好等于上限，所以量程判断用的是 `>=` 而不是 `>`。
+各卷积步长为 1、无填充，后接 LeakyReLU。Actor 与 Critic 分别持有 `8→192` 的机体状态线性层：Actor 将深度图与状态特征相加，Critic 将深度图、状态与 TOA 特征相加。融合输出为 **192 维**，直接送入各自的循环网络，默认 SRU-LSTM、隐藏维度 **256**、一层；没有额外循环前投影。循环后的 Actor MLP 为 **[512,512]**，Critic MLP 为 **[256,256]**，激活函数均为 LeakyReLU，分别输出三维高斯动作均值和状态价值。
 
-编码器在构造时加载权重，随后整体冻结：恒为 eval（BatchNorm 使用预训练运行统计，策略整体的 `train()` 不会把它切回训练态）、参数不参与反向、不在优化器参数组里。环境包装层在观测传回 CPU 前执行编码，rollout buffer 保存 `depth_features`，不保存原始 `camera`；采样时的策略前向、超时 bootstrap 和所有 PPO minibatch 都复用这些特征。自动重置前的终止观测单独按结束环境批量编码，避免误用新回合观测。Actor 与 Critic 默认复用同一份特征（`share_depth_encoder=True`）；置 `False` 时分别编码并额外保存 `critic_depth_features`。状态投影、TOA 编码器、循环网络前的线性投影和循环网络仍在每次更新时训练，不缓存它们的输出。深度特征与状态、TOA 特征逐元素相加后形成 3072 维特征，经独立的 Actor/Critic 线性层投影到 `recurrent_input_size`，默认 **256**，再送入循环单元。`feature_dim` 仍为 `64 × ceil(depth_height/8) × ceil(depth_width/8)`，默认 **3072**，由配置校验。
+CNN、状态投影、循环网络与策略头均参与 PPO 更新。rollout buffer 保存原始 `camera`、`robot_state` 和 `critic_toa`；训练 minibatch 重新运行可训练 CNN，不缓存其特征。Actor 不读取 TOA，部署仅需深度图和机体状态。`feature_dim` 默认 192，可独立于相机分辨率调整；Actor 的三次卷积要求深度图高宽至少为 6。
 
-冻结编码器仍随模型保存，环境包装层引用同一个实例，不额外复制权重；仿真和网络设备不同时，将深度图传到网络设备编码。特征缓存调整本身不改变 checkpoint 权重键或导出格式；本次新增循环前投影层后，旧版策略 checkpoint 缺少投影层参数，且循环单元输入权重形状不同，不能直接恢复或评估，需用新版结构重新训练。新版部署端仍可输入米制 `camera`，或预先编码后向 Actor 传入 `depth_features`。CPU buffer 的存储策略不变，循环单元输入从 3072 维降为默认 256 维。
+此次只恢复网络结构，深度观测仍保留当前米制语义：相机原图先做非有限值清理及 4×4 最小池化，再将量程外读数置 0，默认得到 48×64 深度图。奖励与 PPO 的 KL 自适应学习率设置保留。
 
-当前规模：编码器 5,323,456 参数（另加均值头里未被前向使用的 logvar 分支 41,152，为满足 `strict=True` 加载而保留），整个模型约 1,520 万参数，其中约 984 万可训练。编码器单图约 71.6 MFLOPs（48×64），前向按 `FORWARD_CHUNK = 1024` 分批以限制激活峰值。
-
-**早期小 CNN checkpoint 无法恢复或评估**：编码器键名从 `actor_encoder.depth.*` 变成 `depth_encoder.*`，且深度观测语义从 [-1, 1] 归一化改为米制深度。加载这类 checkpoint 会在 `load_state_dict` 处报明确的错误，导出产物也升到 `version: 2`；已经采用 RegNetX 的 checkpoint 不受此次特征缓存调整影响。
+新 checkpoint 的 `network.architecture` 为 `tutorial_cnn_v1`，导出版本为 **3**。旧 RegNet、带循环前投影或早期 CNN checkpoint 缺少当前结构标记，不能直接恢复、评估或导出；需要使用对应历史代码或重新训练，避免混用网络与输入语义。
 
 Lee 控制器在机体系力矩中加入 `Ω × (JΩ)`，补偿刚体方程的陀螺耦合。接触历史检测及控制器修复会改变旧 checkpoint 的仿真轨迹和结局；与修复前的评估结果比较时，请同时记录代码版本。
 
@@ -497,7 +491,7 @@ python scripts/export_actor.py \
 
 输出为项目定义的 PyTorch 权重与配置字典，不是 TorchScript 或 ONNX，也不是 `play.py` 接受的完整训练 checkpoint。
 
-导出产物的 `version` 为 2，`observation` 段包含 `depth_height`、`depth_width`、`depth_min_distance`、`depth_max_distance`、`depth_invalid_distance` 等键。部署侧必须按新语义构造输入：喂给网络的 `camera` 是**米制深度**（0 表示无效），不再是 [-1, 1] 的归一化图像。`actor` 段包含共享的 `depth_encoder.*` 权重，因此产物比 version 1 大约多 21 MB。
+导出产物的 `version` 为 3，`network` 段记录当前网络配置，`observation` 段记录深度量程、分辨率和动作边界。部署侧输入 `camera` 仍为**米制深度**（0 表示无效）；`actor` 段包含 `actor_encoder.camera.*`、状态投影、循环网络、MLP 与动作头权重，不包含 Critic 或历史 RegNet 编码器。
 
 ## 8. 验证与第三方来源
 

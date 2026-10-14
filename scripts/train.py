@@ -298,7 +298,7 @@ def main() -> None:
         )
         config = TrainConfig(
             env=task_config,
-            network=NetworkConfig(**saved["network"])
+            network=NetworkConfig.from_checkpoint(saved["network"])
             if saved
             else NetworkConfig(recurrent_type=args.recurrent_type),
             algorithm=algorithm,

@@ -4,7 +4,6 @@ import csv
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -26,7 +25,11 @@ from ta_sru.models.recurrent import build_recurrent
 
 def _observation(num_envs: int) -> dict[str, np.ndarray]:
     return {
-        "camera": np.zeros((num_envs, 1, 12, 16), dtype=np.float32),
+        # 使用非零深度，才能检验卷积权重是否收到有效梯度并被 PPO 更新。
+        "camera": np.broadcast_to(
+            np.linspace(0.25, 10.0, 12 * 16, dtype=np.float32).reshape(1, 1, 12, 16),
+            (num_envs, 1, 12, 16),
+        ).copy(),
         "robot_state": np.zeros((num_envs, 8), dtype=np.float32),
         "critic_toa": np.zeros((num_envs, 1, 16, 16), dtype=np.float32),
     }
@@ -120,11 +123,10 @@ class ModelTests(unittest.TestCase):
             model.act_actor(observation, state, starts)[0],
             model.act_actor(changed, state, starts)[0],
         )
-        depth_feature = model.depth_encoder(observation["camera"])
         self.assertFalse(
             torch.allclose(
-                model.critic_encoder(observation, depth_feature),
-                model.critic_encoder(changed, depth_feature),
+                model.critic_encoder(observation),
+                model.critic_encoder(changed),
             )
         )
 
@@ -153,10 +155,7 @@ class ModelTests(unittest.TestCase):
         # 值本身。对数概率必须与采样时刻一致，否则 PPO 的概率比会带上一个与动作
         # 相关的系统偏差。
         _, replayed, _ = model.evaluate_sequences(
-            {
-                key: value.unsqueeze(0)
-                for key, value in model.encode_depth_observation(observation).items()
-            },
+            {key: value.unsqueeze(0) for key, value in observation.items()},
             action.unsqueeze(0),
             state,
             starts.unsqueeze(0),
@@ -251,14 +250,22 @@ class AlgorithmTests(unittest.TestCase):
                     )
                 )
                 agent.collect_rollout()
-                self.assertNotIn("camera", agent.buffer.observations)
-                self.assertIn("depth_features", agent.buffer.observations)
-                with patch.object(
-                    agent.policy.depth_encoder,
-                    "forward",
-                    side_effect=AssertionError("PPO 更新不能重新编码图像"),
-                ):
-                    metrics = agent.update()
+                self.assertIn("camera", agent.buffer.observations)
+                self.assertNotIn("depth_features", agent.buffer.observations)
+                before = (
+                    agent.policy.critic_encoder.camera.convolution[0]
+                    .weight.detach()
+                    .clone()
+                )
+                metrics = agent.update()
+                self.assertFalse(
+                    torch.equal(
+                        before, agent.policy.critic_encoder.camera.convolution[0].weight
+                    )
+                )
+                self.assertIsNotNone(
+                    agent.policy.actor_encoder.camera.convolution[0].weight.grad
+                )
                 self.assertTrue(np.isfinite(metrics["policy_loss"]))
                 self.assertTrue(np.isfinite(metrics["value_loss"]))
                 self.assertTrue(np.isfinite(metrics["analytic_kl"]))
@@ -288,22 +295,26 @@ class AlgorithmTests(unittest.TestCase):
             )
             path = Path(directory) / "checkpoints" / "model.pt"
             agent = RecurrentPPO(FakeVectorEnv(), config)
-            # 编码器权重以 checkpoint 为准，加载后不能沿用默认权重的初始特征。
-            agent.policy.depth_encoder.vae_sampler.mean_layers[-1].bias.add_(1.0)
+            # 可训练 CNN 的权重也必须完整恢复。
+            with torch.no_grad():
+                agent.policy.actor_encoder.camera.projection.bias.add_(1.0)
             agent.optimizer.param_groups[0]["lr"] = 2e-4
             agent.save(path)
             restored = RecurrentPPO(FakeVectorEnv(), config)
-            before = restored.observation["depth_features"].copy()
             restored.load(path)
-            np.testing.assert_allclose(
-                restored.observation["depth_features"], before + 1.0, atol=1e-5
+            torch.testing.assert_close(
+                restored.policy.actor_encoder.camera.projection.bias,
+                agent.policy.actor_encoder.camera.projection.bias,
             )
+            self.assertIn("camera", restored.observation)
             self.assertEqual(restored.optimizer.param_groups[0]["lr"], 2e-4)
             artifact_path = export_actor(path, Path(directory) / "actor.pt")
             artifact = torch.load(artifact_path, map_location="cpu", weights_only=True)
-            self.assertEqual(artifact["version"], 2)
+            self.assertEqual(artifact["version"], 3)
             self.assertTrue(
-                any(key.startswith("depth_encoder.") for key in artifact["actor"])
+                any(
+                    key.startswith("actor_encoder.camera.") for key in artifact["actor"]
+                )
             )
 
             # 写出的 checkpoint 必须带动作参数化标识，否则新 checkpoint 会被当成

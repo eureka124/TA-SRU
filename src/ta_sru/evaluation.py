@@ -36,7 +36,7 @@ def load_evaluation_policy(checkpoint: dict, device: str):
     require_supported_action_transform(checkpoint.get("action_transform"))
     require_scene_checkpoint(checkpoint)
     values = checkpoint["config"]
-    network = NetworkConfig(**values["network"])
+    network = NetworkConfig.from_checkpoint(values["network"])
     algorithm = values.get("algorithm", "recurrent_ppo")
     if algorithm not in ("ppo", "recurrent_ppo") or (
         (algorithm == "ppo") != (network.recurrent_type == "none")

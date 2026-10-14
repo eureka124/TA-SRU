@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -28,13 +27,12 @@ from ta_sru.models.depth_encoder import (
     resolve_weights_path,
 )
 
-# 测试用的最小网络：12×16 深度图对应 64×2×2 = 256 维特征。
-SMALL_FEATURE_DIM = depth_feature_size(12, 16)
+# 测试用网络保留 tutorial 的 192 维融合，只缩小循环层与策略头。
 
 
 def _small_network() -> NetworkConfig:
     return NetworkConfig(
-        feature_dim=SMALL_FEATURE_DIM,
+        feature_dim=192,
         recurrent_hidden_size=8,
         actor_hidden_sizes=(8,),
         critic_hidden_sizes=(8,),
@@ -46,59 +44,62 @@ def _pretrained_state() -> dict[str, torch.Tensor]:
 
 
 class DepthEncoderTests(unittest.TestCase):
-    def test_cached_features_match_raw_policy_and_train_without_encoder(self) -> None:
-        for shared in (True, False):
-            with self.subTest(shared=shared):
-                model = AsymmetricRecurrentActorCritic(
-                    replace(_small_network(), share_depth_encoder=shared)
-                ).eval()
-                observation = {
-                    "camera": torch.rand(2, 1, 12, 16),
-                    "robot_state": torch.rand(2, 8),
-                    "critic_toa": torch.rand(2, 1, 16, 16),
-                }
-                starts = torch.tensor([True, False])
-                state = model.initial_state(2)
-                expected = model.act(observation, state, starts, deterministic=True)
-                encoded = model.encode_depth_observation(observation)
-                self.assertNotIn("camera", encoded)
-                self.assertFalse(encoded["depth_features"].requires_grad)
-                if not shared:
-                    self.assertIn("critic_depth_features", encoded)
-                model.train()
-                with mock.patch.object(
-                    DepthFeatureEncoder,
-                    "forward",
-                    side_effect=AssertionError("缓存路径不能再次编码"),
-                ):
-                    actual = model.act(encoded, state, starts, deterministic=True)
-                    for before, after in zip(expected[:3], actual[:3]):
-                        torch.testing.assert_close(before, after)
-                    actor_action, _ = model.act_actor(
-                        {
-                            key: encoded[key]
-                            for key in ("depth_features", "robot_state")
-                        },
-                        state,
-                        starts,
-                    )
-                    torch.testing.assert_close(actor_action, expected[0])
-                    torch.testing.assert_close(
-                        model.predict_value(encoded, state.critic, starts), expected[1]
-                    )
-                    values, log_prob, entropy = model.evaluate_sequences(
-                        {key: value.unsqueeze(0) for key, value in encoded.items()},
-                        expected[0].unsqueeze(0),
-                        state,
-                        starts.unsqueeze(0),
-                    )
-                    torch.testing.assert_close(log_prob[0], expected[2])
-                    (values.sum() + log_prob.sum() - entropy.sum()).backward()
-                self.assertIsNotNone(model.actor_encoder.robot_state.weight.grad)
-                self.assertIsNotNone(model.critic_encoder.robot_state.weight.grad)
-                self.assertTrue(
-                    all(p.grad is None for p in model.depth_encoder.parameters())
-                )
+    def test_tutorial_cnn_branches_are_independent_and_trainable(self) -> None:
+        model = AsymmetricRecurrentActorCritic(_small_network())
+        observation = {
+            "camera": torch.rand(2, 1, 12, 16),
+            "robot_state": torch.rand(2, 8),
+            "critic_toa": torch.rand(2, 1, 16, 16),
+        }
+        self.assertEqual(model.actor_encoder(observation).shape, (2, 192))
+        self.assertEqual(model.critic_encoder(observation).shape, (2, 192))
+        for encoder, channels in (
+            (model.actor_encoder.camera, (8, 16, 32)),
+            (model.critic_encoder.camera, (8, 16)),
+            (model.critic_encoder.toa, (8, 16)),
+        ):
+            convolutions = [
+                layer
+                for layer in encoder.convolution
+                if isinstance(layer, torch.nn.Conv2d)
+            ]
+            self.assertEqual(
+                tuple(layer.out_channels for layer in convolutions), channels
+            )
+            self.assertEqual(convolutions[0].kernel_size, (2, 2))
+            self.assertTrue(
+                all(layer.kernel_size == (3, 3) for layer in convolutions[1:])
+            )
+        self.assertNotEqual(
+            model.actor_encoder.camera.convolution[0].weight.data_ptr(),
+            model.critic_encoder.camera.convolution[0].weight.data_ptr(),
+        )
+        state = model.initial_state(2)
+        starts = torch.zeros(2, dtype=torch.bool)
+        action, value, sampled_log_prob, _ = model.act(observation, state, starts)
+        actor_action, _ = model.act_actor(observation, state, starts)
+        expected, _, _, _ = model.act(observation, state, starts, deterministic=True)
+        torch.testing.assert_close(actor_action, expected)
+        torch.testing.assert_close(
+            model.predict_value(observation, state.critic, starts), value
+        )
+        values, log_prob, entropy = model.evaluate_sequences(
+            {key: tensor.unsqueeze(0) for key, tensor in observation.items()},
+            action.unsqueeze(0),
+            state,
+            starts.unsqueeze(0),
+        )
+        torch.testing.assert_close(log_prob[0], sampled_log_prob)
+        (values.sum() + log_prob.sum() - entropy.sum()).backward()
+        for encoder in (
+            model.actor_encoder.camera,
+            model.critic_encoder.camera,
+            model.critic_encoder.toa,
+        ):
+            self.assertIsNotNone(encoder.convolution[0].weight.grad)
+        self.assertTrue(
+            all(parameter.requires_grad for parameter in model.parameters())
+        )
 
     def test_native_wrapper_encodes_terminal_before_reset_in_one_batch(self) -> None:
         def observation(value):
@@ -193,14 +194,6 @@ class DepthEncoderTests(unittest.TestCase):
         encoder.train()
         self.assertFalse(encoder.training)
 
-    def test_orthogonal_initialization_keeps_pretrained_weights(self) -> None:
-        """策略的正交初始化直接写 .data，必须显式跳过冻结编码器。"""
-
-        model = AsymmetricRecurrentActorCritic(_small_network())
-        state = _pretrained_state()
-        for key, value in model.depth_encoder.state_dict().items():
-            self.assertTrue(torch.equal(value, state[key]), key)
-
     def test_missing_weights_fail_loudly(self) -> None:
         encoder = DepthFeatureEncoder()
         with self.assertRaisesRegex(FileNotFoundError, "预训练权重不存在"):
@@ -225,18 +218,6 @@ class DepthEncoderTests(unittest.TestCase):
         self.assertEqual(resolve_weights_path(None), default_weights_path())
         self.assertEqual(
             resolve_weights_path("~/custom.pth"), Path("~/custom.pth").expanduser()
-        )
-
-    def test_shared_encoder_is_single_copy(self) -> None:
-        shared = AsymmetricRecurrentActorCritic(_small_network())
-        self.assertIsNone(shared.critic_depth_encoder)
-        separate = AsymmetricRecurrentActorCritic(
-            replace(_small_network(), share_depth_encoder=False)
-        )
-        frozen = sum(p.numel() for p in shared.parameters() if not p.requires_grad)
-        self.assertEqual(
-            sum(p.numel() for p in separate.parameters() if not p.requires_grad),
-            2 * frozen,
         )
 
 
@@ -286,17 +267,24 @@ class DepthObservationTests(unittest.TestCase):
 
 
 class DepthEncoderConfigTests(unittest.TestCase):
-    def test_default_config_is_self_consistent(self) -> None:
+    def test_default_config_matches_tutorial(self) -> None:
         config = TrainConfig()
         config.validate()
-        self.assertEqual(
-            config.network.feature_dim,
-            depth_feature_size(config.env.depth_height, config.env.depth_width),
-        )
+        self.assertEqual(config.network.feature_dim, 192)
+        self.assertEqual(config.network.recurrent_hidden_size, 256)
+        self.assertEqual(config.network.actor_hidden_sizes, (512, 512))
+        self.assertEqual(config.network.critic_hidden_sizes, (256, 256))
 
-    def test_feature_dim_must_match_encoder_output(self) -> None:
-        with self.assertRaisesRegex(ValueError, "feature_dim 必须等于深度编码器输出"):
-            TrainConfig(network=NetworkConfig(feature_dim=512)).validate()
+    def test_feature_width_is_independent_of_camera_resolution(self) -> None:
+        TrainConfig(network=NetworkConfig(feature_dim=512)).validate()
+        with self.assertRaisesRegex(ValueError, "至少为 6"):
+            TrainConfig(env=EnvConfig(depth_height=5)).validate()
+
+    def test_old_architecture_is_rejected_before_loading_weights(self) -> None:
+        with self.assertRaisesRegex(ValueError, "旧网络结构"):
+            NetworkConfig.from_checkpoint(
+                {"feature_dim": 3072, "share_depth_encoder": True}
+            )
 
     def test_depth_range_order_is_validated(self) -> None:
         with self.assertRaisesRegex(ValueError, "深度量程"):

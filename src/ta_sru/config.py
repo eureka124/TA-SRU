@@ -178,8 +178,15 @@ class EnvConfig:
             value = getattr(self, name)
             if not isfinite(value) or value <= 0:
                 raise ValueError(f"{name} 必须为有限正数")
-        if not 0.0 < self.depth_min_distance < self.depth_max_distance < self.depth_invalid_distance:
-            raise ValueError("深度量程必须满足 0 < depth_min_distance < depth_max_distance < depth_invalid_distance")
+        if (
+            not 0.0
+            < self.depth_min_distance
+            < self.depth_max_distance
+            < self.depth_invalid_distance
+        ):
+            raise ValueError(
+                "深度量程必须满足 0 < depth_min_distance < depth_max_distance < depth_invalid_distance"
+            )
         for name in ("safety_margin", "spawn_margin", "obstacle_min_separation"):
             if not isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} 必须为有限非负数")
@@ -195,15 +202,22 @@ class EnvConfig:
             raise ValueError("随机种子不能为负数")
         if not 0 <= self.maze_wall_removal_probability <= 1:
             raise ValueError("拆墙概率必须位于 [0, 1]")
-        if self.cell_size <= 2 * (self.drone_radius + self.safety_margin + self.spawn_margin):
+        if self.cell_size <= 2 * (
+            self.drone_radius + self.safety_margin + self.spawn_margin
+        ):
             raise ValueError("场景栅格宽度不足以容纳无人机及出生余量")
-        if self.map_split not in ("train", "eval") or self.evaluation_episodes_per_map < 0:
+        if (
+            self.map_split not in ("train", "eval")
+            or self.evaluation_episodes_per_map < 0
+        ):
             raise ValueError("地图池或评估配额不合法")
         if self.toa_crop_size != 16:
             raise ValueError("Critic TOA 输入必须保持 16×16")
         if self.toa_safe_distance <= 0.0 or not 0.0 < self.toa_slow_speed <= 1.0:
             raise ValueError("TOA 安全距离必须为正，慢速比例必须位于 (0, 1]")
-        if self.toa_normalization_max is not None and not (0.0 < self.toa_normalization_max < float("inf")):
+        if self.toa_normalization_max is not None and not (
+            0.0 < self.toa_normalization_max < float("inf")
+        ):
             raise ValueError("toa_normalization_max 必须为有限正数或 None")
         if any(low >= high for low, high in zip(self.action_low, self.action_high)):
             raise ValueError("每个动作下界都必须小于上界")
@@ -213,14 +227,10 @@ class EnvConfig:
 class NetworkConfig:
     """非对称 Actor–Critic 网络配置。"""
 
-    # Actor 与 Critic 各观测编码器输出的特征维度，必须等于冻结深度编码器的展平输出
-    # depth_feature_size(depth_height, depth_width)：48×64 对应 64×6×8 = 3072。
-    feature_dim: int = 3072
-    # 融合特征进入循环网络前的投影宽度。
-    recurrent_input_size: int = 256
-    # 深度编码器预训练权重路径；为 None 时使用仓库内的
-    # assets/depth_encoder/vae_pretrain_new.pth。
-    depth_encoder_weights: str | None = None
+    # 标记当前结构，避免把旧 RegNet checkpoint 当成可训练小 CNN 静默恢复。
+    architecture: str = "tutorial_cnn_v1"
+    # 深度图、机体状态与 TOA 分支投影后相加，直接作为循环网络输入。
+    feature_dim: int = 192
     # Actor 与 Critic 使用的循环单元类型。
     recurrent_type: str = "sru-lstm"
     # 每层循环单元的隐藏状态维度。
@@ -230,26 +240,33 @@ class NetworkConfig:
     # Actor 在循环网络之后各全连接隐藏层的宽度。
     actor_hidden_sizes: tuple[int, ...] = (512, 512)
     # Critic 在循环网络之后各全连接隐藏层的宽度。
-    critic_hidden_sizes: tuple[int, ...] = (512, 512)
+    critic_hidden_sizes: tuple[int, ...] = (256, 256)
     # 高斯动作分布可训练对数标准差的初始值。
     initial_log_std: float = 0.0
-    # Actor 与 Critic 共用同一个冻结的预训练深度编码器。置 False 时各自持有一份，
-    # 但两份权重完全相同且都冻结，仅作为消融开关保留，代价是多占一份显存。
-    share_depth_encoder: bool = True
+
+    @classmethod
+    def from_checkpoint(cls, values: dict) -> NetworkConfig:
+        """仅恢复明确记录当前网络结构的 checkpoint。"""
+
+        if values.get("architecture") != "tutorial_cnn_v1":
+            raise ValueError(
+                "checkpoint 使用旧网络结构；当前已恢复 tutorial 的可训练小 CNN、"
+                "192 维融合特征和独立 Actor/Critic。旧 RegNet 或早期 CNN 权重不能"
+                "直接恢复、评估或导出，请使用对应版本代码或重新训练。"
+            )
+        config = cls(**values)
+        config.validate()
+        return config
 
     def validate(self) -> None:
+        if self.architecture != "tutorial_cnn_v1":
+            raise ValueError("当前网络只支持 tutorial_cnn_v1 结构")
         self.recurrent_type = normalize_recurrent_type(self.recurrent_type)
         if self.recurrent_type not in RECURRENT_TYPES:
             choices = ", ".join(RECURRENT_TYPES)
             raise ValueError(f"recurrent_type 必须是以下值之一：{choices}")
-        if (
-            self.feature_dim <= 0
-            or self.recurrent_input_size <= 0
-            or self.recurrent_hidden_size <= 0
-        ):
-            raise ValueError(
-                "feature_dim、recurrent_input_size 和 recurrent_hidden_size 必须为正数"
-            )
+        if self.feature_dim <= 0 or self.recurrent_hidden_size <= 0:
+            raise ValueError("feature_dim 和 recurrent_hidden_size 必须为正数")
         if self.recurrent_layers <= 0:
             raise ValueError("recurrent_layers 必须为正数")
 
@@ -340,20 +357,13 @@ class TrainConfig:
         self.env.total_training_steps = self.total_timesteps
         self.env.validate()
         self.network.validate()
-        # 深度编码器输出与 feature_dim 必须对齐，否则循环单元输入宽度和 robot_state
-        # 的投影宽度会与实际特征不符。放在这里校验是因为只有 TrainConfig 同时持有两者。
-        # 局部导入：models 包会反向导入本模块，放在顶层会构成循环导入。
-        from ta_sru.models.depth_encoder import depth_feature_size
-
-        expected = depth_feature_size(self.env.depth_height, self.env.depth_width)
-        if self.network.feature_dim != expected:
-            raise ValueError(
-                f"feature_dim 必须等于深度编码器输出 {expected}"
-                f"（64 × {self.env.depth_height}/8 × {self.env.depth_width}/8）；"
-                f"当前为 {self.network.feature_dim}"
-            )
+        # Actor 连续三次无填充卷积总共缩小五个像素，池化前至少保留一个像素。
+        if min(self.env.depth_height, self.env.depth_width) < 6:
+            raise ValueError("tutorial CNN 的深度图高宽必须至少为 6")
         if self.algorithm not in ("ppo", "recurrent_ppo"):
             raise ValueError("algorithm 必须是 ppo 或 recurrent_ppo")
         if (self.algorithm == "ppo") != (self.network.recurrent_type == "none"):
-            raise ValueError("普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元")
+            raise ValueError(
+                "普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元"
+            )
         self.ppo.validate(self.env.num_envs)

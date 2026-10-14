@@ -162,6 +162,12 @@ def make_isaac_env_cfg(task: EnvConfig, sim_device: str) -> IsaacNavigationEnvCf
     cfg.sim.dt = task.physics_dt
     cfg.sim.render_interval = task.control_decimation
     cfg.sim.device = sim_device
+    # 默认接触缓冲会让张量后端额外申请约 640 MiB；按环境数预留容量，
+    # 小规模评估至少保留一百万个接触，大规模训练仍可使用默认上限。
+    cfg.sim.physx.gpu_max_rigid_contact_count = min(
+        cfg.sim.physx.gpu_max_rigid_contact_count,
+        max(2**20, task.num_envs * 4096),
+    )
     cfg.scene.num_envs = task.num_envs
     cfg.debug_vis = task.debug
     # 历史窗口恰好覆盖一个策略步，并随物理步长和抽取倍数同步调整。

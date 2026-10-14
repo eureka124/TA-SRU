@@ -216,6 +216,8 @@ class NetworkConfig:
     # Actor 与 Critic 各观测编码器输出的特征维度，必须等于冻结深度编码器的展平输出
     # depth_feature_size(depth_height, depth_width)：48×64 对应 64×6×8 = 3072。
     feature_dim: int = 3072
+    # 融合特征进入循环网络前的投影宽度。
+    recurrent_input_size: int = 256
     # 深度编码器预训练权重路径；为 None 时使用仓库内的
     # assets/depth_encoder/vae_pretrain_new.pth。
     depth_encoder_weights: str | None = None
@@ -240,8 +242,14 @@ class NetworkConfig:
         if self.recurrent_type not in RECURRENT_TYPES:
             choices = ", ".join(RECURRENT_TYPES)
             raise ValueError(f"recurrent_type 必须是以下值之一：{choices}")
-        if self.feature_dim <= 0 or self.recurrent_hidden_size <= 0:
-            raise ValueError("feature_dim 和 recurrent_hidden_size 必须为正数")
+        if (
+            self.feature_dim <= 0
+            or self.recurrent_input_size <= 0
+            or self.recurrent_hidden_size <= 0
+        ):
+            raise ValueError(
+                "feature_dim、recurrent_input_size 和 recurrent_hidden_size 必须为正数"
+            )
         if self.recurrent_layers <= 0:
             raise ValueError("recurrent_layers 必须为正数")
 

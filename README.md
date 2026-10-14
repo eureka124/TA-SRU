@@ -476,9 +476,9 @@ Isaac Sim / PhysX → NavigationEnv → IsaacLabWrapper → PPO
 
 结构复刻自参考工程（导航侧 `mdp/depth_utils/depth_noise_encoder.py`，训练侧 `sru-depth-pretraining/network/encoder.py`），权重来自 `vae_pretrain_new.pth`。输入是**原始米制深度**而不是归一化图像，`depth_min_distance`（默认 0.25 m）与 `depth_max_distance`（默认 10 m）之外的读数一律置 0，因此 0 表示无效。注意相机截断距离恰好等于 `depth_max_distance`，无返回的射线取值正好等于上限，所以量程判断用的是 `>=` 而不是 `>`。
 
-编码器在构造时加载权重，随后整体冻结：恒为 eval（BatchNorm 使用预训练运行统计，策略整体的 `train()` 不会把它切回训练态）、参数不参与反向、不在优化器参数组里。环境包装层在观测传回 CPU 前执行编码，rollout buffer 保存 `depth_features`，不保存原始 `camera`；采样时的策略前向、超时 bootstrap 和所有 PPO minibatch 都复用这些特征。自动重置前的终止观测单独按结束环境批量编码，避免误用新回合观测。Actor 与 Critic 默认复用同一份特征（`share_depth_encoder=True`）；置 `False` 时分别编码并额外保存 `critic_depth_features`。状态投影、TOA 编码器和循环网络仍在每次更新时训练，不缓存它们的输出。深度特征与状态、TOA 特征逐元素相加后送入循环单元，`feature_dim` 仍为 `64 × ceil(depth_height/8) × ceil(depth_width/8)`，默认 **3072**，由配置校验。
+编码器在构造时加载权重，随后整体冻结：恒为 eval（BatchNorm 使用预训练运行统计，策略整体的 `train()` 不会把它切回训练态）、参数不参与反向、不在优化器参数组里。环境包装层在观测传回 CPU 前执行编码，rollout buffer 保存 `depth_features`，不保存原始 `camera`；采样时的策略前向、超时 bootstrap 和所有 PPO minibatch 都复用这些特征。自动重置前的终止观测单独按结束环境批量编码，避免误用新回合观测。Actor 与 Critic 默认复用同一份特征（`share_depth_encoder=True`）；置 `False` 时分别编码并额外保存 `critic_depth_features`。状态投影、TOA 编码器、循环网络前的线性投影和循环网络仍在每次更新时训练，不缓存它们的输出。深度特征与状态、TOA 特征逐元素相加后形成 3072 维特征，经独立的 Actor/Critic 线性层投影到 `recurrent_input_size`，默认 **256**，再送入循环单元。`feature_dim` 仍为 `64 × ceil(depth_height/8) × ceil(depth_width/8)`，默认 **3072**，由配置校验。
 
-冻结编码器仍随模型保存，环境包装层引用同一个实例，不额外复制权重；仿真和网络设备不同时，将深度图传到网络设备编码。此次特征缓存调整不改变 checkpoint 权重键或导出格式：已有 RegNetX checkpoint 可以继续加载，加载后重新编码初始观测；部署端仍可输入米制 `camera`，或预先编码后向 Actor 传入 `depth_features`。CPU buffer 的存储策略及循环输入维度不变，本次优化主要减少重复前向计算，不保证 buffer 内存下降。
+冻结编码器仍随模型保存，环境包装层引用同一个实例，不额外复制权重；仿真和网络设备不同时，将深度图传到网络设备编码。特征缓存调整本身不改变 checkpoint 权重键或导出格式；本次新增循环前投影层后，旧版策略 checkpoint 缺少投影层参数，且循环单元输入权重形状不同，不能直接恢复或评估，需用新版结构重新训练。新版部署端仍可输入米制 `camera`，或预先编码后向 Actor 传入 `depth_features`。CPU buffer 的存储策略不变，循环单元输入从 3072 维降为默认 256 维。
 
 当前规模：编码器 5,323,456 参数（另加均值头里未被前向使用的 logvar 分支 41,152，为满足 `strict=True` 加载而保留），整个模型约 1,520 万参数，其中约 984 万可训练。编码器单图约 71.6 MFLOPs（48×64），前向按 `FORWARD_CHUNK = 1024` 分批以限制激活峰值。
 

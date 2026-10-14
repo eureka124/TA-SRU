@@ -151,20 +151,26 @@ class AsymmetricRecurrentActorCritic(nn.Module):
         )
         self.actor_encoder = ActorEncoder(self.robot_state_size, config.feature_dim)
         self.critic_encoder = CriticEncoder(self.robot_state_size, config.feature_dim)
+        self.actor_recurrent_projection = nn.Linear(
+            config.feature_dim, config.recurrent_input_size
+        )
+        self.critic_recurrent_projection = nn.Linear(
+            config.feature_dim, config.recurrent_input_size
+        )
         self.actor_recurrent = build_recurrent(
             config.recurrent_type,
-            config.feature_dim,
+            config.recurrent_input_size,
             config.recurrent_hidden_size,
             config.recurrent_layers,
         )
         self.critic_recurrent = build_recurrent(
             config.recurrent_type,
-            config.feature_dim,
+            config.recurrent_input_size,
             config.recurrent_hidden_size,
             config.recurrent_layers,
         )
         latent_size = (
-            config.feature_dim
+            config.recurrent_input_size
             if config.recurrent_type == "none"
             else config.recurrent_hidden_size
         )
@@ -267,7 +273,9 @@ class AsymmetricRecurrentActorCritic(nn.Module):
         )
         features = self.actor_encoder(sequence, depth_feature)
         output, actor_state = self.actor_recurrent(
-            features, state.actor, episode_starts.unsqueeze(0)
+            self.actor_recurrent_projection(features),
+            state.actor,
+            episode_starts.unsqueeze(0),
         )
         action = self.action_mean(self.actor_mlp(output[0]))
         return action, RecurrentState(actor_state, state.critic)
@@ -288,10 +296,10 @@ class AsymmetricRecurrentActorCritic(nn.Module):
         actor_features = self.actor_encoder(sequence, actor_depth)
         critic_features = self.critic_encoder(sequence, critic_depth)
         actor_output, actor_state = self.actor_recurrent(
-            actor_features, state.actor, starts
+            self.actor_recurrent_projection(actor_features), state.actor, starts
         )
         critic_output, critic_state = self.critic_recurrent(
-            critic_features, state.critic, starts
+            self.critic_recurrent_projection(critic_features), state.critic, starts
         )
         distribution = self._distribution(actor_output[0])
         action = distribution.mean if deterministic else distribution.sample()
@@ -314,10 +322,14 @@ class AsymmetricRecurrentActorCritic(nn.Module):
         actor_features = self.actor_encoder(observation, actor_depth)
         critic_features = self.critic_encoder(observation, critic_depth)
         actor_output, _ = self.actor_recurrent(
-            actor_features, state.actor, episode_starts
+            self.actor_recurrent_projection(actor_features),
+            state.actor,
+            episode_starts,
         )
         critic_output, _ = self.critic_recurrent(
-            critic_features, state.critic, episode_starts
+            self.critic_recurrent_projection(critic_features),
+            state.critic,
+            episode_starts,
         )
         distribution = self._distribution(actor_output)
         log_probability = distribution.log_prob(action).sum(dim=-1)
@@ -336,6 +348,8 @@ class AsymmetricRecurrentActorCritic(nn.Module):
         _, critic_depth = self._depth_features(sequence)
         features = self.critic_encoder(sequence, critic_depth)
         output, _ = self.critic_recurrent(
-            features, critic_state, episode_starts.unsqueeze(0)
+            self.critic_recurrent_projection(features),
+            critic_state,
+            episode_starts.unsqueeze(0),
         )
         return self.value_head(self.critic_mlp(output[0])).squeeze(-1)

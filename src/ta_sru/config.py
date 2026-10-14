@@ -231,6 +231,10 @@ class NetworkConfig:
     architecture: str = "tutorial_cnn_v1"
     # 深度图、机体状态与 TOA 分支投影后相加，直接作为循环网络输入。
     feature_dim: int = 192
+    # 限制每次卷积处理的图像数量，独立于 PPO minibatch 的样本数。
+    cnn_chunk_size: int = 128
+    # 更新时重算 CNN 激活，避免大 minibatch 同时保留所有卷积中间结果。
+    cnn_gradient_checkpointing: bool = True
     # Actor 与 Critic 使用的循环单元类型。
     recurrent_type: str = "sru-lstm"
     # 每层循环单元的隐藏状态维度。
@@ -267,6 +271,8 @@ class NetworkConfig:
             raise ValueError(f"recurrent_type 必须是以下值之一：{choices}")
         if self.feature_dim <= 0 or self.recurrent_hidden_size <= 0:
             raise ValueError("feature_dim 和 recurrent_hidden_size 必须为正数")
+        if self.cnn_chunk_size <= 0:
+            raise ValueError("cnn_chunk_size 必须为正数")
         if self.recurrent_layers <= 0:
             raise ValueError("recurrent_layers 必须为正数")
 

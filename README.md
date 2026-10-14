@@ -74,6 +74,7 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 | `assets/hummingbird/hummingbird.yaml` | 无人机物理及控制参数。 |
 | `assets/depth_encoder/vae_pretrain_new.pth` | 深度编码器的预训练权重（22.7 MB，普通 Git 文件）。 |
 | `tests/test_depth_encoder.py` | tutorial CNN 结构与梯度、历史编码器和深度预处理检查。 |
+| `tests/test_cnn_memory.py` | CNN 分块与激活重算的输出、梯度等价性及反向传播张量占用检查。 |
 | `tests/test_evaluation.py` | 检查独立评估池配置、结局优先级和每张地图配额。 |
 | `tests/test_playback.py` | 检查原始深度、视频编码、并行回合隔离及回放保存上限。 |
 | `tests/test_dfs.py` | DFS 树结构、几何、缓存、点目标 TOA、归一化奖励及恢复校验。 |
@@ -474,6 +475,8 @@ Isaac Sim / PhysX → NavigationEnv → IsaacLabWrapper → PPO
 各卷积步长为 1、无填充，后接 LeakyReLU。Actor 与 Critic 分别持有 `8→192` 的机体状态线性层：Actor 将深度图与状态特征相加，Critic 将深度图、状态与 TOA 特征相加。融合输出为 **192 维**，直接送入各自的循环网络，默认 SRU-LSTM、隐藏维度 **256**、一层；没有额外循环前投影。循环后的 Actor MLP 为 **[512,512]**，Critic MLP 为 **[256,256]**，激活函数均为 LeakyReLU，分别输出三维高斯动作均值和状态价值。
 
 CNN、状态投影、循环网络与策略头均参与 PPO 更新。rollout buffer 保存原始 `camera`、`robot_state` 和 `critic_toa`；训练 minibatch 重新运行可训练 CNN，不缓存其特征。Actor 不读取 TOA，部署仅需深度图和机体状态。`feature_dim` 默认 192，可独立于相机分辨率调整；Actor 的三次卷积要求深度图高宽至少为 6。
+
+为限制大 minibatch 的显存峰值，三个 CNN 均按 `network.cnn_chunk_size` 分块处理图像（默认 128 张），更新时默认启用 `network.cnn_gradient_checkpointing`：反向传播重算各块的卷积激活，以增加计算换取显存。此设置保持网络结构、PPO batch size 和每次更新的梯度语义；仅分块而不重算，仍会保留整个 minibatch 的激活。采样和评估无需梯度时只分块，不重算。旧 `tutorial_cnn_v1` checkpoint 缺少这两个字段时采用上述默认值，权重仍可直接加载。
 
 此次只恢复网络结构，深度观测仍保留当前米制语义：相机原图先做非有限值清理及 4×4 最小池化，再将量程外读数置 0，默认得到 48×64 深度图。奖励与 PPO 的 KL 自适应学习率设置保留。
 

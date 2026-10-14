@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 from torch.distributions import Normal
+from torch.utils.checkpoint import checkpoint
 
 from ta_sru.config import NetworkConfig
 from ta_sru.models.recurrent import RecurrentStateTuple, build_recurrent
@@ -67,8 +68,18 @@ def _mlp(input_size: int, hidden_sizes: tuple[int, ...]) -> tuple[nn.Sequential,
 class ImageEncoder(nn.Module):
     """小型 CNN；自适应池化让输入分辨率可调整。"""
 
-    def __init__(self, channels: tuple[int, ...], output_size: int) -> None:
+    def __init__(
+        self,
+        channels: tuple[int, ...],
+        output_size: int,
+        chunk_size: int = 128,
+        gradient_checkpointing: bool = True,
+    ) -> None:
         super().__init__()
+        if chunk_size <= 0:
+            raise ValueError("chunk_size 必须为正数")
+        self.chunk_size = chunk_size
+        self.gradient_checkpointing = gradient_checkpointing
         layers: list[nn.Module] = []
         input_channels = 1
         kernels = (2,) + (3,) * (len(channels) - 1)
@@ -84,20 +95,43 @@ class ImageEncoder(nn.Module):
         self.convolution = nn.Sequential(*layers)
         self.projection = nn.Linear(input_channels * 2 * 3, output_size)
 
+    def _encode(self, image: torch.Tensor) -> torch.Tensor:
+        return self.projection(self.convolution(image))
+
     def forward(self, image: torch.Tensor) -> torch.Tensor:
         prefix = image.shape[:-3]
         flat_image = image.reshape(-1, *image.shape[-3:]).float()
-        encoded = self.projection(self.convolution(flat_image))
+        chunks = []
+        for chunk in flat_image.split(self.chunk_size):
+            if (
+                self.training
+                and torch.is_grad_enabled()
+                and self.gradient_checkpointing
+            ):
+                # 原始观测不需要梯度；非重入模式仍能计算 CNN 参数的梯度。
+                # 仅分块仍会保留所有块的激活，因此更新时还必须重算激活。
+                encoded = checkpoint(
+                    self._encode, chunk, use_reentrant=False, preserve_rng_state=False
+                )
+            else:
+                encoded = self._encode(chunk)
+            chunks.append(encoded)
+        encoded = torch.cat(chunks, dim=0)
         return encoded.reshape(*prefix, -1)
 
 
 class ActorEncoder(nn.Module):
     """独立可训练的深度图 CNN 与机体状态投影，结构对齐 tutorial。"""
 
-    def __init__(self, robot_state_size: int, feature_size: int) -> None:
+    def __init__(self, robot_state_size: int, config: NetworkConfig) -> None:
         super().__init__()
-        self.camera = ImageEncoder((8, 16, 32), feature_size)
-        self.robot_state = nn.Linear(robot_state_size, feature_size)
+        self.camera = ImageEncoder(
+            (8, 16, 32),
+            config.feature_dim,
+            config.cnn_chunk_size,
+            config.cnn_gradient_checkpointing,
+        )
+        self.robot_state = nn.Linear(robot_state_size, config.feature_dim)
 
     def forward(self, observation: Observation) -> torch.Tensor:
         return self.camera(observation["camera"]) + self.robot_state(
@@ -108,11 +142,21 @@ class ActorEncoder(nn.Module):
 class CriticEncoder(nn.Module):
     """独立的两层深度图、TOA CNN 与机体状态投影。"""
 
-    def __init__(self, robot_state_size: int, feature_size: int) -> None:
+    def __init__(self, robot_state_size: int, config: NetworkConfig) -> None:
         super().__init__()
-        self.camera = ImageEncoder((8, 16), feature_size)
-        self.robot_state = nn.Linear(robot_state_size, feature_size)
-        self.toa = ImageEncoder((8, 16), feature_size)
+        self.camera = ImageEncoder(
+            (8, 16),
+            config.feature_dim,
+            config.cnn_chunk_size,
+            config.cnn_gradient_checkpointing,
+        )
+        self.robot_state = nn.Linear(robot_state_size, config.feature_dim)
+        self.toa = ImageEncoder(
+            (8, 16),
+            config.feature_dim,
+            config.cnn_chunk_size,
+            config.cnn_gradient_checkpointing,
+        )
 
     def forward(self, observation: Observation) -> torch.Tensor:
         return (
@@ -136,8 +180,8 @@ class AsymmetricRecurrentActorCritic(nn.Module):
         super().__init__()
         config.validate()
         self.config = config
-        self.actor_encoder = ActorEncoder(self.robot_state_size, config.feature_dim)
-        self.critic_encoder = CriticEncoder(self.robot_state_size, config.feature_dim)
+        self.actor_encoder = ActorEncoder(self.robot_state_size, config)
+        self.critic_encoder = CriticEncoder(self.robot_state_size, config)
         self.actor_recurrent = build_recurrent(
             config.recurrent_type,
             config.feature_dim,

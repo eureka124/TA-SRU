@@ -72,6 +72,7 @@ debug/
 # DFS 验证入口与测试需要纳入版本控制。
 !tests/test_core.py
 !tests/test_depth_encoder.py
+!tests/test_cnn_memory.py
 !tests/test_ppo_update.py
 !tests/test_navigation_control.py
 !tests/test_controller_step_response.py

@@ -154,7 +154,8 @@ def require_scene_checkpoint(checkpoint: dict) -> None:
 
     manifest = checkpoint.get("scene_manifest")
     values = checkpoint.get("config") or {}
-    scene_type = values.get("scene_type", "dfs")
+    # 保存的是 TrainConfig，场景字段位于嵌套的 EnvConfig 中。
+    scene_type = values.get("env", {}).get("scene_type", "dfs")
     if not isinstance(manifest, dict) or manifest.get("scene_version") != (
         scene_version(scene_type)
     ):

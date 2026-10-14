@@ -5,7 +5,7 @@ from dataclasses import asdict
 
 import numpy as np
 
-from ta_sru.config import EnvConfig
+from ta_sru.config import EnvConfig, TrainConfig
 from ta_sru.envs.maze import (
     OBSTACLE_SCENE_VERSION,
     SCENE_VERSION,
@@ -202,21 +202,27 @@ class ObstacleFieldTests(unittest.TestCase):
         self.assertNotEqual(OBSTACLE_SCENE_VERSION, SCENE_VERSION)
         with self.assertRaisesRegex(ValueError, "未知场景类型"):
             scene_version("walls")
-        require_scene_checkpoint(
-            {
-                "config": {"scene_type": "obstacles"},
-                "scene_manifest": {"scene_version": OBSTACLE_SCENE_VERSION},
-            }
-        )
+        # 使用与 RecurrentPPO.save 相同的配置结构，避免伪造字段层级掩盖错误。
+        for scene_type in ("dfs", "obstacles"):
+            with self.subTest(scene_type=scene_type):
+                checkpoint = {
+                    "config": asdict(TrainConfig(env=EnvConfig(scene_type=scene_type))),
+                    "scene_manifest": {"scene_version": scene_version(scene_type)},
+                }
+                require_scene_checkpoint(checkpoint)
+                for incompatible_version in (
+                    scene_version("dfs" if scene_type == "obstacles" else "obstacles"),
+                    "old-toa-version",
+                    None,
+                ):
+                    checkpoint["scene_manifest"]["scene_version"] = incompatible_version
+                    with self.assertRaisesRegex(ValueError, "场景"):
+                        require_scene_checkpoint(checkpoint)
         # 旧 checkpoint 没有 scene_type 字段时按 DFS 处理。
         require_scene_checkpoint({"scene_manifest": {"scene_version": SCENE_VERSION}})
-        with self.assertRaisesRegex(ValueError, "场景"):
-            require_scene_checkpoint(
-                {
-                    "config": {"scene_type": "obstacles"},
-                    "scene_manifest": {"scene_version": SCENE_VERSION},
-                }
-            )
+        require_scene_checkpoint(
+            {"config": {"env": {}}, "scene_manifest": {"scene_version": SCENE_VERSION}}
+        )
 
     def test_manifests_only_extend_the_obstacle_scene(self):
         """DFS 清单保持历史键集合，只有障碍场地追加参数。"""

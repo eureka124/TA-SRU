@@ -48,6 +48,7 @@ from ta_sru.models.hummingbird import (
 )
 from ta_sru.models.hummingbird_asset import HUMMINGBIRD_CFG
 from ta_sru.models.lee_controller import LeePositionController
+from ta_sru.models.navigation_control import compute_velocity_yaw_wrench
 
 TRAJECTORY_MAX_POINTS = 512
 TRAJECTORY_POINT_SPACING = 0.15
@@ -406,28 +407,6 @@ class NavigationEnv(DirectRLEnv):
 
     def _apply_action(self) -> None:
         quaternion = self.robot.data.root_quat_w
-        w, x, y, z = quaternion.unbind(dim=-1)
-        forward = torch.stack(
-            (w * w + x * x - y * y - z * z, 2 * (x * y + w * z)), dim=-1
-        )
-        forward = forward / torch.linalg.vector_norm(
-            forward, dim=-1, keepdim=True
-        ).clamp_min(1.0e-6)
-        side = torch.stack((-forward[:, 1], forward[:, 0]), dim=-1)
-        target_velocity_xy = (
-            forward * self.actions[:, 0:1] + side * self.actions[:, 1:2]
-        )
-        target_velocity = torch.cat(
-            (target_velocity_xy, torch.zeros((self.num_envs, 1), device=self.device)),
-            dim=-1,
-        )
-        self.position_setpoints[:, :2] += target_velocity_xy * self.physics_dt
-        self.position_setpoints[:, 2] = 2.0
-        self.yaw_setpoints += self.actions[:, 2:3] * self.physics_dt
-        self.yaw_setpoints[:] = (self.yaw_setpoints + torch.pi) % (
-            2 * torch.pi
-        ) - torch.pi
-
         root_state = torch.cat(
             (
                 self.robot.data.root_pos_w,
@@ -437,12 +416,13 @@ class NavigationEnv(DirectRLEnv):
             ),
             dim=-1,
         )
-        wrench = self.controller(
+        wrench = compute_velocity_yaw_wrench(
+            self.controller,
             root_state,
+            self.actions,
             self.position_setpoints,
-            target_velocity,
-            torch.zeros_like(target_velocity),
             self.yaw_setpoints,
+            self.physics_dt,
         )
         forces = torch.zeros((self.num_envs, 1, 3), device=self.device)
         forces[:, 0, 2] = wrench[:, 0]
@@ -460,9 +440,7 @@ class NavigationEnv(DirectRLEnv):
         if depth.ndim == 3:
             depth = depth.unsqueeze(-1)
         depth = depth.permute(0, 3, 1, 2)
-        depth = sanitize_depth(
-            depth, invalid_distance=self.task.depth_invalid_distance
-        )
+        depth = sanitize_depth(depth, invalid_distance=self.task.depth_invalid_distance)
         depth = downsample_depth(depth)
         return mask_invalid_depth(
             depth,

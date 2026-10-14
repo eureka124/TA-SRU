@@ -73,6 +73,8 @@ debug/
 !tests/test_core.py
 !tests/test_depth_encoder.py
 !tests/test_ppo_update.py
+!tests/test_navigation_control.py
+!tests/test_controller_step_response.py
 !tests/test_dfs.py
 !tests/test_obstacles.py
 .cache/

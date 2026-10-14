@@ -30,6 +30,7 @@ USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指�
 | 文件 | 用途 |
 | --- | --- |
 | `scripts/check_dfs_scene.py` | 用两个小型环境检查共享场景、传感器及回合重置；`--scene-type obstacles` 检查障碍场地。 |
+| `scripts/controller_step_response.py` | 在独立无障碍场景中测试前向、侧向和偏航角速度阶跃与回零响应；默认悬停 1 秒、阶跃 6 秒、回零 6 秒，输出 CSV、运行摘要和曲线页面。`--plot-csv` 可从旧数据重新生成曲线，无需启动仿真。 |
 | `scripts/preview_scene.py` | 不启动仿真，把地图池渲染成 PNG 并打印障碍物数量与最小表面间距。 |
 | `scripts/train.py` | 新建或恢复训练，启动仿真，创建运行目录，保存配置、日志和 checkpoint。 |
 | `scripts/play.py` | 加载命令行指定的 checkpoint，运行独立 DFS 地图池的评估，保存统计及可选回放。 |

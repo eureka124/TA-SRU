@@ -258,6 +258,15 @@ class DfsTests(unittest.TestCase):
         self.assertIn("minimum_contact_force_threshold", saved)
         validate_resume_config(saved, restored)
 
+    def test_resume_ignores_removed_camera_fov_field(self):
+        # 旧 checkpoint 的 env 段含已删除的视场角字段，恢复训练必须照常进行。
+        saved = asdict(self.config())
+        saved["camera_horizontal_fov"] = 1.5707963
+        restored = training_env_config(saved, {})
+        self.assertNotIn("camera_horizontal_fov", asdict(restored))
+        self.assertIn("camera_horizontal_fov", saved)
+        validate_resume_config(saved, restored)
+
     def test_fixed_collision_threshold_requires_finite_positive_force(self):
         for threshold in (0.0, -1.0, float("inf"), float("nan")):
             with (

@@ -310,7 +310,7 @@ class AlgorithmTests(unittest.TestCase):
             self.assertEqual(restored.optimizer.param_groups[0]["lr"], 2e-4)
             artifact_path = export_actor(path, Path(directory) / "actor.pt")
             artifact = torch.load(artifact_path, map_location="cpu", weights_only=True)
-            self.assertEqual(artifact["version"], 3)
+            self.assertEqual(artifact["version"], 4)
             self.assertTrue(
                 any(
                     key.startswith("actor_encoder.camera.") for key in artifact["actor"]

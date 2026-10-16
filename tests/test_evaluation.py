@@ -99,6 +99,13 @@ class EvaluationTests(unittest.TestCase):
         self.assertNotIn("contact_penalty_ramp_fraction", asdict(config))
         self.assertIn("contact_penalty_ramp_fraction", original)
 
+    def test_evaluation_accepts_removed_camera_fov_config(self):
+        # 从未被相机读取的视场角字段已删除，旧 checkpoint 仍须能评估。
+        original = {"toa_normalization_max": 125.0, "camera_horizontal_fov": 1.5707963}
+        config = EnvConfig(**configure_evaluation(original))
+        self.assertIn("camera_horizontal_fov", original)
+        self.assertNotIn("camera_horizontal_fov", asdict(config))
+
     def test_outcome_precedence(self):
         self.assertEqual(
             evaluation_outcome({"collided": True, "success": True, "time_out": True}),

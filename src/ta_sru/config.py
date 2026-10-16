@@ -81,8 +81,6 @@ class EnvConfig:
     depth_max_distance: float = 10.0
     # NaN／无穷等异常读数的替换值，单位为米；必须大于上限才能保证被置 0。
     depth_invalid_distance: float = 50.0
-    # 深度相机的水平视场角，单位为弧度。
-    camera_horizontal_fov: float = 1.5707963267948966
 
     # 期望 TOA 栅格间距，实际间距由地图范围推导。
     toa_resolution: float = 0.1

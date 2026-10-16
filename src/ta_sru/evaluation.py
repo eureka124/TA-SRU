@@ -13,6 +13,8 @@ def configure_evaluation(values: dict) -> dict:
     # 兼容仍包含碰撞课程字段的旧 checkpoint。
     values.pop("minimum_contact_force_threshold", None)
     values.pop("contact_penalty_ramp_fraction", None)
+    # 兼容仍包含已删除的相机水平视场角字段的旧 checkpoint。
+    values.pop("camera_horizontal_fov", None)
     if values.get("toa_normalization_max") is None:
         raise ValueError("DFS 评估需要 checkpoint 中的训练 TOA 观测量程")
     values.update(

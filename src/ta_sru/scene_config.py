@@ -21,6 +21,8 @@ def training_env_config(saved: dict | None, overrides: dict) -> EnvConfig:
     # 旧 checkpoint 的碰撞课程字段已废弃，恢复时使用固定阈值和完整惩罚。
     values.pop("minimum_contact_force_threshold", None)
     values.pop("contact_penalty_ramp_fraction", None)
+    # 旧 checkpoint 记录过相机水平视场角，该字段从未被相机读取，已从配置中删除。
+    values.pop("camera_horizontal_fov", None)
     for key, value in overrides.items():
         if value is None:
             continue

@@ -480,7 +480,7 @@ CNN、状态投影、循环网络与策略头均参与 PPO 更新。rollout buff
 
 此次只恢复网络结构，深度观测仍保留当前米制语义：相机原图先做非有限值清理及 4×4 最小池化，再将量程外读数置 0，默认得到 48×64 深度图。奖励与 PPO 的 KL 自适应学习率设置保留。
 
-新 checkpoint 的 `network.architecture` 为 `tutorial_cnn_v1`，导出版本为 **3**。旧 RegNet、带循环前投影或早期 CNN checkpoint 缺少当前结构标记，不能直接恢复、评估或导出；需要使用对应历史代码或重新训练，避免混用网络与输入语义。
+新 checkpoint 的 `network.architecture` 为 `tutorial_cnn_v1`，导出版本为 **4**。旧 RegNet、带循环前投影或早期 CNN checkpoint 缺少当前结构标记，不能直接恢复、评估或导出；需要使用对应历史代码或重新训练，避免混用网络与输入语义。
 
 Lee 控制器在机体系力矩中加入 `Ω × (JΩ)`，补偿刚体方程的陀螺耦合。接触历史检测及控制器修复会改变旧 checkpoint 的仿真轨迹和结局；与修复前的评估结果比较时，请同时记录代码版本。
 
@@ -494,7 +494,7 @@ python scripts/export_actor.py \
 
 输出为项目定义的 PyTorch 权重与配置字典，不是 TorchScript 或 ONNX，也不是 `play.py` 接受的完整训练 checkpoint。
 
-导出产物的 `version` 为 3，`network` 段记录当前网络配置，`observation` 段记录深度量程、分辨率和动作边界。部署侧输入 `camera` 仍为**米制深度**（0 表示无效）；`actor` 段包含 `actor_encoder.camera.*`、状态投影、循环网络、MLP 与动作头权重，不包含 Critic 或历史 RegNet 编码器。
+导出产物的 `version` 为 4，`network` 段记录当前网络配置，`observation` 段记录深度量程、分辨率和动作边界。部署侧输入 `camera` 仍为**米制深度**（0 表示无效）；`actor` 段包含 `actor_encoder.camera.*`、状态投影、循环网络、MLP 与动作头权重，不包含 Critic 或历史 RegNet 编码器。
 
 ## 8. 验证与第三方来源
 

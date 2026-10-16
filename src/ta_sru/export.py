@@ -24,14 +24,14 @@ ENV_KEYS = (
     "depth_min_distance",
     "depth_max_distance",
     "depth_invalid_distance",
-    "camera_horizontal_fov",
     "physics_dt",
     "control_decimation",
     "action_low",
     "action_high",
 )
 # 版本 3：恢复 tutorial 可训练小 CNN 和 192 维融合；深度输入仍为米制深度。
-ARTIFACT_VERSION = 3
+# 版本 4：observation 段移除从未被相机读取的 camera_horizontal_fov。
+ARTIFACT_VERSION = 4
 
 
 def export_actor(checkpoint_path, output_path):

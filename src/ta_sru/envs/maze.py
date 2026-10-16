@@ -13,8 +13,8 @@ from ta_sru.envs.primitives import Box, Solid, solid_record
 
 GENERATOR_VERSION = "dfs-walls-v1"
 SCENE_VERSION = "dfs-point-toa-start-normalized-v1"
-OBSTACLE_GENERATOR_VERSION = "obstacle-field-bridson-v1"
-OBSTACLE_SCENE_VERSION = "obstacle-field-point-toa-start-normalized-v1"
+OBSTACLE_GENERATOR_VERSION = "obstacle-field-bridson-random-aligned-u-v3"
+OBSTACLE_SCENE_VERSION = "obstacle-field-opposite-sides-point-toa-v3"
 
 SCENE_VERSIONS = {"dfs": SCENE_VERSION, "obstacles": OBSTACLE_SCENE_VERSION}
 GENERATOR_VERSIONS = {"dfs": GENERATOR_VERSION, "obstacles": OBSTACLE_GENERATOR_VERSION}
@@ -43,6 +43,8 @@ class MazeDefinition:
     wall_height: float
     # 每个元素是一个障碍物，由若干实体图元组成：圆柱一个，U 形障碍三块墙。
     obstacles: tuple[tuple[Solid, ...], ...] = ()
+    # 障碍场地每张地图共用的开口朝向；DFS 不设置该值。
+    opening_yaw: float | None = None
 
     @property
     def extent(self) -> float:
@@ -57,6 +59,8 @@ class MazeDefinition:
             payload.append(
                 [solid_record(solid) for group in self.obstacles for solid in group]
             )
+        if self.opening_yaw is not None:
+            payload.append({"opening_yaw": self.opening_yaw})
         return digest(payload)
 
     def rectangles(self) -> list[tuple[float, float, float, float]]:

@@ -76,21 +76,39 @@ def components(free: np.ndarray) -> np.ndarray:
     return labels
 
 
-def start_candidates(config: EnvConfig, clearance: np.ndarray) -> np.ndarray:
-    """只保留边界墙内侧第一圈格子中满足出生余量的 TOA 栅格点。"""
+def start_candidates(
+    config: EnvConfig, clearance: np.ndarray, maze: MazeDefinition | None = None
+) -> np.ndarray:
+    """保留外围安全起点；障碍场地进一步限制在开口朝向的一侧。"""
     candidates = np.argwhere(clearance > config.spawn_margin)
     cells = np.floor(
         (coordinates(config)[candidates] + config.arena_half_extent) / config.cell_size
     ).astype(np.int32)
     outer_ring = np.any((cells == 1) | (cells == config.maze_size - 2), axis=1)
-    return candidates[outer_ring]
+    candidates = candidates[outer_ring]
+    if maze is not None and maze.opening_yaw is not None:
+        candidates = _side_candidates(config, maze, candidates, side=1)
+    return candidates
+
+
+def _side_candidates(
+    config: EnvConfig, maze: MazeDefinition, candidates: np.ndarray, side: int
+) -> np.ndarray:
+    """沿开口方向投影，取内边界最外一格宽的正侧或负侧区域。"""
+    direction = np.asarray((np.cos(maze.opening_yaw), np.sin(maze.opening_yaw)))
+    projection = coordinates(config)[candidates[:, ::-1]] @ direction
+    # 方形场地沿该方向的投影范围随角度变化，斜向时对应角落附近的边界带。
+    threshold = (maze.extent - 2 * config.cell_size) * np.abs(direction).sum()
+    return candidates[side * projection >= threshold]
 
 
 def sample_goals(
     config: EnvConfig, maze: MazeDefinition, clearance: np.ndarray, labels: np.ndarray
 ) -> np.ndarray:
     candidates = np.argwhere(clearance > config.spawn_margin)
-    starts = start_candidates(config, clearance)
+    if maze.opening_yaw is not None:
+        candidates = _side_candidates(config, maze, candidates, side=-1)
+    starts = start_candidates(config, clearance, maze)
     if not len(starts):
         raise ValueError(f"{maze.name} 最外围一圈格子没有满足出生余量的起点")
     rng = np.random.default_rng(np.random.SeedSequence([maze.seed, 1701]))
@@ -270,9 +288,11 @@ def build_toa_bank(config: EnvConfig) -> ToaBank:
                     "goals": goals.tolist(),
                 }
             )
+            if maze.opening_yaw is not None:
+                records[-1]["opening_yaw"] = maze.opening_yaw
             if split != config.map_split:
                 continue
-            candidates = start_candidates(config, clearance)
+            candidates = start_candidates(config, clearance, maze)
             eligible_start = np.zeros(len(candidates), dtype=bool)
             for goal in goals:
                 toa, _ = cached_toa(config, maze, clearance, labels, goal)
@@ -319,6 +339,11 @@ def build_toa_bank(config: EnvConfig) -> ToaBank:
     }
     # DFS 清单保持历史结构；只有障碍场地才追加参数，旧 checkpoint 仍能逐字段比对。
     if config.scene_type == "obstacles":
+        manifest["sampling"].update(
+            version="opening-side-to-opposite-side-v1",
+            start_region="opening_side_outer_band",
+            goal_region="opposite_side_outer_band",
+        )
         manifest["obstacle_field"] = {
             "arena_size": config.arena_size,
             "cell_size": config.cell_size,
@@ -333,6 +358,7 @@ def build_toa_bank(config: EnvConfig) -> ToaBank:
                 "arm_length": config.u_shape_arm_length,
                 "arm_thickness": config.u_shape_arm_thickness,
                 "opening": config.u_shape_opening,
+                "opening_direction": "uniform_random_per_map",
             },
         }
     bank = ToaBank(

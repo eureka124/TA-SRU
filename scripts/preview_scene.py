@@ -134,6 +134,7 @@ def layout_summary(maze) -> str:
     return (
         f"{maze.name}: 圆柱 {cylinders} 个、U 形 {len(groups) - cylinders} 个、"
         f"实体 {len(solids)} 块、最小间距 {min(gaps):.3f} m"
+        + (f"、开口朝向 {np.degrees(maze.opening_yaw):.1f}°" if maze.opening_yaw is not None else "")
     )
 
 

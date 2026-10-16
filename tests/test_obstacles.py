@@ -1,7 +1,7 @@
 """随机障碍场地的摆放间距、连通性、网格与场景版本验证。"""
 
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import numpy as np
 
@@ -42,6 +42,8 @@ class ObstacleFieldTests(unittest.TestCase):
 
     def test_counts_sizes_and_minimum_separation(self):
         config = self.config()
+        self.assertEqual(config.u_shape_count, 10)
+        self.assertEqual(config.u_shape_opening, 2.4)
         maze = generate_obstacle_field(config, 20261010)
         groups = maze.obstacles
         self.assertEqual(len(groups), config.cylinder_count + config.u_shape_count)
@@ -53,8 +55,19 @@ class ObstacleFieldTests(unittest.TestCase):
             self.assertEqual(cylinder.radius, config.cylinder_radius)
             self.assertEqual((cylinder.z0, cylinder.z1), (0.0, config.arena_height))
         expected = u_shape_solids(config, 0.0, 0.0, 0.0)
+        direction = np.array((np.cos(maze.opening_yaw), np.sin(maze.opening_yaw)))
+        lateral = np.array((-direction[1], direction[0]))
         for group in u_shapes:
+            back, upper, lower = group
+            self.assertGreater(np.array((upper.x - back.x, upper.y - back.y)) @ direction, 0)
+            self.assertGreater(np.array((lower.x - back.x, lower.y - back.y)) @ direction, 0)
+            self.assertAlmostEqual(
+                np.array((upper.x - lower.x, upper.y - lower.y)) @ lateral
+                - (upper.size_y + lower.size_y) / 2,
+                config.u_shape_opening,
+            )
             for solid, reference in zip(group, expected):
+                self.assertEqual(solid.yaw, maze.opening_yaw)
                 self.assertEqual(
                     (solid.size_x, solid.size_y, solid.z1),
                     (reference.size_x, reference.size_y, reference.z1),
@@ -169,12 +182,43 @@ class ObstacleFieldTests(unittest.TestCase):
         first = generate_obstacle_field(config, 42)
         again = generate_obstacle_field(config, 42)
         self.assertEqual(first.content_hash, again.content_hash)
+        self.assertEqual(first.opening_yaw, again.opening_yaw)
         self.assertNotEqual(
             generate_obstacle_field(config, 43).content_hash, first.content_hash
         )
         pools = build_map_pools(config)
         hashes = [maze.content_hash for maze in pools["train"]]
         self.assertEqual(len(set(hashes)), len(hashes))
+        maps = pools["train"] + pools["eval"]
+        self.assertEqual(len({maze.opening_yaw for maze in maps}), len(maps))
+        for maze in maps:
+            for group in maze.obstacles:
+                if len(group) == 3:
+                    self.assertTrue(all(solid.yaw == maze.opening_yaw for solid in group))
+
+    def test_starts_face_openings_and_goals_are_on_opposite_side(self):
+        config = self.config(train_map_count=4, eval_map_count=2)
+        for split in ("train", "eval"):
+            current = replace(config, map_split=split)
+            bank = build_toa_bank(current)
+            for map_id, maze in enumerate(bank.maps):
+                direction = np.array((np.cos(maze.opening_yaw), np.sin(maze.opening_yaw)))
+                threshold = (maze.extent - 2 * config.cell_size) * np.abs(direction).sum()
+                starts = coordinates(config)[bank.starts[map_id][:, ::-1]]
+                goals = bank.goals[map_id * config.goals_per_map : (map_id + 1) * config.goals_per_map]
+                self.assertTrue(np.all(starts @ direction >= threshold - 1e-6))
+                self.assertTrue(np.all(goals @ direction <= -threshold + 1e-6))
+                clearance = obstacle_clearance(config, maze)
+                self.assertTrue(np.all(clearance[tuple(bank.starts[map_id].T)] > config.spawn_margin))
+                for episode in range(10):
+                    _, goal_id, start, initial_toa = bank.sample(current, 0, episode, map_id)
+                    goal = goals[goal_id]
+                    self.assertGreater(float(start @ direction), 0)
+                    self.assertLess(float(goal @ direction), 0)
+                    self.assertGreaterEqual(np.linalg.norm(start - goal), config.min_start_goal_distance)
+                    self.assertTrue(np.isfinite(initial_toa) and initial_toa > 0)
+                    repeated = bank.sample(current, 0, episode, map_id)
+                    np.testing.assert_array_equal(start, repeated[2])
 
     def test_default_layout_is_reachable_for_many_seeds(self):
         config = self.config()
@@ -213,6 +257,8 @@ class ObstacleFieldTests(unittest.TestCase):
                 for incompatible_version in (
                     scene_version("dfs" if scene_type == "obstacles" else "obstacles"),
                     "old-toa-version",
+                    "obstacle-field-point-toa-start-normalized-v1",
+                    "obstacle-field-point-toa-start-normalized-v2",
                     None,
                 ):
                     checkpoint["scene_manifest"]["scene_version"] = incompatible_version
@@ -249,6 +295,11 @@ class ObstacleFieldTests(unittest.TestCase):
         self.assertNotIn("obstacle_field", dfs.manifest)
         self.assertEqual(obstacle.manifest["scene_version"], OBSTACLE_SCENE_VERSION)
         self.assertEqual(obstacle.manifest["obstacle_field"]["cylinders"]["count"], 60)
+        u_shapes = obstacle.manifest["obstacle_field"]["u_shapes"]
+        self.assertEqual(u_shapes["count"], 10)
+        self.assertEqual(u_shapes["opening"], 2.4)
+        self.assertEqual(u_shapes["opening_direction"], "uniform_random_per_map")
+        self.assertEqual(obstacle.manifest["sampling"]["goal_region"], "opposite_side_outer_band")
 
     def test_obstacle_arena_reaches_thirty_metres(self):
         config = self.config()
@@ -261,11 +312,12 @@ class ObstacleFieldTests(unittest.TestCase):
         """圆柱生长到饱和后才抽样，不允许在允许区域内留下整片空区。
 
         早期实现一边生长一边在凑够数量时停止，每张地图都是围绕初始种子点的一团，
-        种子对侧会空掉一大片：8 张地图 4×4 分区计数的极差达到 0.83× 理想值，
-        饱和后抽样降到约 0.50×，因此阈值取 0.65×。
+        种子对侧会空掉一大片。对纯圆柱场地的 8 张地图统计 4×4 分区计数，
+        要求极差小于理想平均值的 0.65 倍。
         """
 
-        config = self.config(train_map_count=8)
+        # 单独验证圆柱采样的覆盖性，避免 U 形障碍占地差异改变各分区可用面积。
+        config = self.config(train_map_count=8, u_shape_count=0)
         maps = build_map_pools(config)["train"]
         limit = (
             config.arena_half_extent

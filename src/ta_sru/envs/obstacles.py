@@ -30,11 +30,14 @@ def generate_obstacle_field(
 ) -> MazeDefinition:
     """生成一张随机障碍场地；单个子种子摆不下时自动换种子重试。"""
 
+    # 朝向使用独立随机流，摆放重试不会改变同一地图的开口方向。
+    direction_rng = np.random.default_rng(np.random.SeedSequence([seed, 5210]))
+    opening_yaw = float(direction_rng.uniform(-math.pi, math.pi))
     for attempt in range(MAP_ATTEMPTS):
         rng = np.random.default_rng(
             np.random.SeedSequence([seed, PLACEMENT_SALT, attempt])
         )
-        obstacles = _place_obstacles(config, rng)
+        obstacles = _place_obstacles(config, rng, opening_yaw)
         if obstacles is not None:
             return MazeDefinition(
                 name,
@@ -43,6 +46,7 @@ def generate_obstacle_field(
                 config.cell_size,
                 config.arena_height,
                 tuple(obstacles),
+                opening_yaw=opening_yaw,
             )
     raise ValueError(
         f"{name} 在 {config.arena_size:g} m 见方的场地内摆不下 "
@@ -53,7 +57,7 @@ def generate_obstacle_field(
 
 
 def _place_obstacles(
-    config: EnvConfig, rng: np.random.Generator
+    config: EnvConfig, rng: np.random.Generator, opening_yaw: float
 ) -> list[tuple[Solid, ...]] | None:
     """返回障碍物分组；任一障碍物摆不下时返回 None 触发整体重采样。"""
 
@@ -62,7 +66,7 @@ def _place_obstacles(
     blocking: list[tuple[Solid, ...]] = [_boundary_solids(config)]
     obstacles: list[tuple[Solid, ...]] = []
     for _ in range(config.u_shape_count):
-        group = _sample_u_shape(config, rng, inner, separation, blocking)
+        group = _sample_u_shape(config, rng, inner, separation, blocking, opening_yaw)
         if group is None:
             return None
         obstacles.append(group)
@@ -79,8 +83,9 @@ def _sample_u_shape(
     inner: float,
     separation: float,
     blocking: list[tuple[Solid, ...]],
+    opening_yaw: float,
 ) -> tuple[Solid, ...] | None:
-    """拒绝采样一个与其他障碍物保持间距的 U 形障碍。"""
+    """使用地图共用朝向采样 U 形障碍，并与其他障碍物保持间距。"""
 
     reach = _u_shape_reach(config)
     limit = inner - separation - reach
@@ -91,7 +96,7 @@ def _sample_u_shape(
             config,
             rng.uniform(-limit, limit),
             rng.uniform(-limit, limit),
-            rng.uniform(-math.pi, math.pi),
+            opening_yaw,
         )
         if _keeps_distance(group, blocking, separation):
             return group

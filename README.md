@@ -350,6 +350,7 @@ python scripts/play.py runs/<运行名>/checkpoints/model_best.pt \
 | --- | --- |
 | `checkpoint` | 必填的位置参数，指定完整训练 checkpoint。 |
 | `--episodes-per-map` | 每张地图的完整回合目标数，默认 100。 |
+| `--episode-seconds` | 单回合仿真时限（秒），必须为有限正数；默认沿用 checkpoint，传入 `160` 可覆盖为 160 秒。 |
 | `--num-envs` | 并行实例数，默认 6，至少 1。 |
 | `--debug` | 按开始顺序预选每张地图第 50 回合附近的 4 个完整回合保存回放；默认第 49–52 个。 |
 | `--steps` | 可选的向量步数上限；达到后提前退出，不保证回合配额完成。 |
@@ -358,6 +359,8 @@ python scripts/play.py runs/<运行名>/checkpoints/model_best.pt \
 | `--headless` | 关闭仿真窗口；省略可观察实时仿真。 |
 
 Ctrl+C、关闭仿真窗口或达到 `--steps` 上限都会结束评估并保存已有完整回合统计。未完成配额时 `complete=false`；未结束的回合不计入分母，也不保存其 debug 回放。
+
+评估先读取 checkpoint 保存的环境配置，因此修改 `EnvConfig.episode_seconds` 的默认值不会改变已有模型的评估时限。需要延长时，在评估命令中显式添加 `--episode-seconds 160`；启动日志会显示实际时限，`summary.json` 也会记录该值。新参数仅影响重新启动的评估。
 
 ## 6. 如何查看评估结果
 
@@ -386,6 +389,7 @@ python -m json.tool runs/<运行名>/evaluation/eval_<时间戳>/summary.json
 | --- | --- |
 | `checkpoint` | 本次评估模型的绝对路径。 |
 | `num_envs`、`collision_force_threshold` | 实际评估实例数和碰撞阈值。 |
+| `episode_seconds`、`policy_dt` | 本次评估实际采用的单回合仿真时限和策略步长，单位为秒。 |
 | `scene_manifest` | 地图种子、摘要、目标栅格和场景版本。 |
 | `episodes_per_map` | 每张地图目标回合数。 |
 | `complete` | 所有评估地图是否全部完成目标配额。 |
@@ -400,7 +404,7 @@ python -m json.tool runs/<运行名>/evaluation/eval_<时间戳>/summary.json
 2. 未碰撞且进入目标范围：成功。
 3. 以上均未发生且达到回合时限：超时。
 
-默认目标水平距离阈值为 0.4 m，回合时限为 40 s，实际由 checkpoint 的环境配置决定。场地四周有墙；代码仍保留越界判断，并在评估中归入碰撞。
+默认目标水平距离阈值为 0.4 m，回合时限由 checkpoint 的环境配置决定，可用 `--episode-seconds` 覆盖。场地四周有墙；代码仍保留越界判断，并在评估中归入碰撞。
 
 三项率的分母都是**该范围内已计入的完整回合数**。非空统计的三项率之和为 1，碰撞率就是发生碰撞的回合数除以完整回合数。完整默认评估中，每张地图应为 100，整体为 1600；提前退出时整体按实际样本数加权，不能把它当作所有评估地图等量评估结果。
 

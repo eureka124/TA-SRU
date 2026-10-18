@@ -9,6 +9,7 @@ import json
 import sys
 import traceback
 from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,12 @@ def parse_args() -> argparse.Namespace:
         "--steps", type=int, default=None, help="可选的提前停止步数上限"
     )
     parser.add_argument("--episodes-per-map", type=int, default=100)
+    parser.add_argument(
+        "--episode-seconds",
+        type=float,
+        default=None,
+        help="单回合仿真时限（秒）；不指定时沿用 checkpoint 的训练配置",
+    )
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--network-device", default=None)
     parser.add_argument(
@@ -38,6 +45,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--num-envs 必须为正数")
     if args.episodes_per_map <= 0 or (args.steps is not None and args.steps <= 0):
         parser.error("回合数量和步数上限必须为正数")
+    if args.episode_seconds is not None and (
+        not isfinite(args.episode_seconds) or args.episode_seconds <= 0
+    ):
+        parser.error("--episode-seconds 必须为有限正数")
     return args
 
 
@@ -84,6 +95,9 @@ def main() -> int:
         require_scene_checkpoint(checkpoint)
         values = checkpoint["config"]
         env_values = configure_evaluation(values["env"])
+        # 显式覆盖本次评估时限，避免 checkpoint 中的旧值覆盖用户指定值。
+        if args.episode_seconds is not None:
+            env_values["episode_seconds"] = args.episode_seconds
         env_values["num_envs"] = args.num_envs
         env_values["evaluation_episodes_per_map"] = args.episodes_per_map
         run_dir = (
@@ -109,6 +123,8 @@ def main() -> int:
         report_metadata = {
             "checkpoint": str(checkpoint_path),
             "num_envs": args.num_envs,
+            "episode_seconds": task_config.episode_seconds,
+            "policy_dt": task_config.policy_dt,
             "collision_force_threshold": task_config.collision_force_threshold,
             "scene_manifest": checkpoint["scene_manifest"],
             "seed": task_config.seed,
@@ -135,6 +151,11 @@ def main() -> int:
         episode_writer.writeheader()
         print(f"评估结果：{results_dir}；每张地图 {stats.target} 回合", flush=True)
         print(f"循环单元：{values['network']['recurrent_type']}")
+        print(
+            f"单回合仿真时限：{task_config.episode_seconds:g} 秒；"
+            f"策略步长：{task_config.policy_dt:g} 秒",
+            flush=True,
+        )
         if args.debug:
             print(f"调试输出：{task_config.debug_output_dir}")
 

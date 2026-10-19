@@ -179,7 +179,7 @@ python scripts/train.py \
 | `--train-map-count` / `--eval-map-count` | `64` / `16` | 训练与独立评估的地图数量，内容不重叠。 |
 | `--goals-per-map` | `8` | 每张地图预采样并缓存 TOA 的目标数量。 |
 | `--maze-size` / `--maze-cell-size` | `15` / `4.0` | DFS 场景：包含外墙的奇数网格尺寸及每格米数；默认地图为 60×60 米。 |
-| `--maze-wall-removal-probability` | `0.25` | DFS 后每条剩余内部隔墙的拆除概率。 |
+| `--maze-wall-removal-probability` | `0.01` | DFS 后每条剩余内部隔墙的拆除概率。 |
 | `--scene-type` | `dfs` | 场景类型：`dfs` 为 DFS 迷宫，`obstacles` 为随机圆柱与 U 形障碍场地。 |
 | `--arena-size` | `30.0` | 障碍场地边长，米；同时决定 TOA 栅格范围（30 米对应 301×301）。 |
 | `--cylinder-count` / `--cylinder-radius` | `60` / `0.3` | 障碍场地的圆柱数量与半径，米。 |

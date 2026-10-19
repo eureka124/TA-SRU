@@ -45,7 +45,7 @@ class EnvConfig:
     goals_per_map: int = 8
     maze_size: int = 15
     maze_cell_size: float = 4.0
-    maze_wall_removal_probability: float = 0.25
+    maze_wall_removal_probability: float = 0.01
     # 场景类型，决定地图生成器。
     scene_type: str = "dfs"
     # 障碍场地边长，单位为米；DFS 场景忽略该项，场地由 maze_size × maze_cell_size 决定。

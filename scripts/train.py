@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--log-dir", default="runs", help="训练日志根目录")
     parser.add_argument(
-        "--run-name", default=None, help="可选实验名，循环单元名称会自动作为前缀"
+        "--run-name", default=None, help="可选实验名，算法或循环单元名称会自动作为后缀"
     )
     parser.add_argument("--checkpoint-dir", default=None, help="可选 checkpoint 根目录")
     parser.add_argument(

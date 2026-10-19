@@ -113,10 +113,16 @@ def supervise(script: Path) -> int:
         )
     prefix = "ppo" if args.algorithm == "ppo" else args.recurrent_type
     if prefix is None and args.resume:
-        prefix = Path(args.resume).resolve().parent.parent.name.split("_", 1)[0]
+        previous_name = Path(args.resume).resolve().parent.parent.name
+        suffix = previous_name.rsplit("_", 1)[-1]
+        prefix = (
+            suffix
+            if suffix in {"ppo", "sru-lstm", "sru-gru", "sru-lstm-gate", "lstm"}
+            else previous_name.split("_", 1)[0]
+        )
     prefix = {"nn.lstm": "lstm"}.get(prefix, (prefix or "sru-lstm").replace("_", "-"))
     name = args.run_name or datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-    directory = (Path(args.log_dir) / f"{prefix}_{name}").resolve()
+    directory = (Path(args.log_dir) / f"{name}_{prefix}").resolve()
     directory.mkdir(parents=True, exist_ok=False)
     (directory / "command.txt").write_text(
         shlex.join(sys.argv) + "\n", encoding="utf-8"

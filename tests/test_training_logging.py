@@ -69,7 +69,7 @@ class TrainingLoggingTests(unittest.TestCase):
                 capture_output=True,
                 timeout=20,
             )
-            directory = root / "runs" / "lstm_test"
+            directory = root / "runs" / "test_lstm"
             status = json.loads((directory / "status.json").read_text())
             log = (directory / "console.log").read_text()
             error_path = directory / "error.json"

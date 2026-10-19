@@ -194,7 +194,7 @@ python scripts/train.py \
 | `--toa-normalization-max` | 新训练自动计算 | Critic 的固定 TOA 量程；省略时新训练使用静态地图的可通行最大值，恢复训练沿用 checkpoint。 |
 | `--network-device` | 跟随 `--device` | 网络设备；`--device` 指定仿真设备。 |
 | `--log-dir` | `runs` | 日志根目录。 |
-| `--run-name` | 时间戳 | 自定义运行名后缀；最终目录带算法或循环单元前缀，同名目录已存在会报错。 |
+| `--run-name` | 时间戳 | 自定义运行名；最终目录为 `<时间戳或运行名>_<算法或循环单元>`，同名目录已存在会报错。 |
 | `--checkpoint-interval` | `5` | 每隔多少次 PPO 更新保存周期 checkpoint。 |
 | `--log-interval` | `1` | 每隔多少次 PPO 更新写 CSV 和 TensorBoard。 |
 | `--debug` | 关闭 | 显示导航标记并保存全局 TOA 图；训练时不生成评估 episode 回放。 |
@@ -265,7 +265,7 @@ TOA 数组按地图/目标共享，不随环境数复制。默认训练池 float
 默认目录结构如下，未启用 debug 或未运行评估时，相应目录可能尚不存在：
 
 ```text
-runs/<算法或循环单元>_<时间戳或运行名>/
+runs/<时间戳或运行名>_<算法或循环单元>/
 ├── config.json                 # 本次训练配置
 ├── command.txt                 # 启动命令
 ├── commit_id.txt               # 基准 Git 提交

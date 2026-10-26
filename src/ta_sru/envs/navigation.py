@@ -572,7 +572,7 @@ class NavigationEnv(DirectRLEnv):
         return terminated, time_out
 
     def _get_rewards(self) -> torch.Tensor:
-        """计算按起点 TOA 归一化的逐策略步奖励，并将总奖励缩放为 0.01 倍。"""
+        """计算按起点 TOA 归一化的逐策略步奖励。"""
 
         goal_delta = self.goal_positions[:, :2] - self.robot.data.root_pos_w[:, :2]
         goal_direction = goal_delta / (
@@ -597,7 +597,7 @@ class NavigationEnv(DirectRLEnv):
             self._contact_force() / self.task.collision_force_threshold
         ).clamp(max=1.0)
         success = self.extras["success"].float()
-        return 0.01 * (
+        return (
             self.task.goal_velocity_weight * goal_velocity
             + self.task.toa_progress_weight * toa_progress
             + self.task.action_smoothness_weight * smoothness

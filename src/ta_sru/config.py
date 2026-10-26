@@ -25,7 +25,7 @@ class EnvConfig:
 
     # 并行运行的向量化环境数量。会被play.sh中的 --num-envs 参数覆盖。
     num_envs: int = 4
-    # 环境、NumPy 与 PyTorch 共用的随机种子。
+    # 地图、回合采样、NumPy 与 PyTorch 共用的随机种子。
     seed: int = 123
     # 是否启用目标、速度、轨迹及 TOA 地图等调试输出。
     debug: bool = False
@@ -38,8 +38,7 @@ class EnvConfig:
     # 单个回合允许持续的仿真时长，单位为秒。
     episode_seconds: float = 160.0
 
-    # 地图、目标和回合采样使用独立随机流。
-    maze_seed: int = 123
+    # 地图、目标和回合采样由同一种子派生独立随机流。
     train_map_count: int = 64
     eval_map_count: int = 16
     goals_per_map: int = 8
@@ -100,18 +99,17 @@ class EnvConfig:
     # 动作三个分量的上界，依次为前向速度、侧向速度和偏航角速度。
     action_high: tuple[float, float, float] = (2.0, 0.5, 1.0471975511965976)
 
-    # 奖励系数按每个策略步计算，各项加总后统一乘以 0.01。
-    # DirectRLEnv 不会像 RewardManager 一样再乘 policy_dt，这里保存总奖励缩放前的系数。
+    # 奖励系数按每个策略步计算，各项加权后直接加总，不再统一缩放。
     # 朝目标方向速度奖励的权重。
     goal_velocity_weight: float = 0.0
     # 按本回合起点 TOA 归一化后的进度奖励权重。
-    toa_progress_weight: float = 500.0
+    toa_progress_weight: float = 5.0
     # 相邻策略步动作变化量惩罚的权重。
     action_smoothness_weight: float = -0.1
     # 接触力归一化惩罚的权重。
-    contact_force_weight: float = -100.0
+    contact_force_weight: float = -1.0
     # 到达目标时一次性奖励的权重。
-    goal_reached_weight: float = 300.0
+    goal_reached_weight: float = 3.0
     # 判定无人机到达目标的水平距离阈值，单位为米。
     goal_threshold: float = 0.4
     # 训练全程固定的碰撞判定力阈值，单位为牛顿。
@@ -176,8 +174,15 @@ class EnvConfig:
             value = getattr(self, name)
             if not isfinite(value) or value <= 0:
                 raise ValueError(f"{name} 必须为有限正数")
-        if not 0.0 < self.depth_min_distance < self.depth_max_distance < self.depth_invalid_distance:
-            raise ValueError("深度量程必须满足 0 < depth_min_distance < depth_max_distance < depth_invalid_distance")
+        if (
+            not 0.0
+            < self.depth_min_distance
+            < self.depth_max_distance
+            < self.depth_invalid_distance
+        ):
+            raise ValueError(
+                "深度量程必须满足 0 < depth_min_distance < depth_max_distance < depth_invalid_distance"
+            )
         for name in ("safety_margin", "spawn_margin", "obstacle_min_separation"):
             if not isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} 必须为有限非负数")
@@ -189,19 +194,26 @@ class EnvConfig:
             raise ValueError("maze_size 必须为不小于 5 的奇数")
         if min(self.train_map_count, self.eval_map_count, self.goals_per_map) <= 0:
             raise ValueError("地图数和目标数必须为正数")
-        if min(self.seed, self.maze_seed) < 0:
-            raise ValueError("随机种子不能为负数")
+        if not 0 <= self.seed <= 2**32 - 1:
+            raise ValueError("seed 必须位于 [0, 4294967295]")
         if not 0 <= self.maze_wall_removal_probability <= 1:
             raise ValueError("拆墙概率必须位于 [0, 1]")
-        if self.cell_size <= 2 * (self.drone_radius + self.safety_margin + self.spawn_margin):
+        if self.cell_size <= 2 * (
+            self.drone_radius + self.safety_margin + self.spawn_margin
+        ):
             raise ValueError("场景栅格宽度不足以容纳无人机及出生余量")
-        if self.map_split not in ("train", "eval") or self.evaluation_episodes_per_map < 0:
+        if (
+            self.map_split not in ("train", "eval")
+            or self.evaluation_episodes_per_map < 0
+        ):
             raise ValueError("地图池或评估配额不合法")
         if self.toa_crop_size != 16:
             raise ValueError("Critic TOA 输入必须保持 16×16")
         if self.toa_safe_distance <= 0.0 or not 0.0 < self.toa_slow_speed <= 1.0:
             raise ValueError("TOA 安全距离必须为正，慢速比例必须位于 (0, 1]")
-        if self.toa_normalization_max is not None and not (0.0 < self.toa_normalization_max < float("inf")):
+        if self.toa_normalization_max is not None and not (
+            0.0 < self.toa_normalization_max < float("inf")
+        ):
             raise ValueError("toa_normalization_max 必须为有限正数或 None")
         if any(low >= high for low, high in zip(self.action_low, self.action_high)):
             raise ValueError("每个动作下界都必须小于上界")
@@ -301,7 +313,9 @@ class PPOConfig:
             raise ValueError("schedule 必须是 adaptive 或 fixed")
         if not isfinite(self.learning_rate) or self.learning_rate <= 0:
             raise ValueError("learning_rate 必须为有限正数")
-        if self.target_kl is not None and (not isfinite(self.target_kl) or self.target_kl <= 0):
+        if self.target_kl is not None and (
+            not isfinite(self.target_kl) or self.target_kl <= 0
+        ):
             raise ValueError("target_kl 必须为有限正数或 None")
         if self.rollout_steps <= 0 or self.batch_size <= 0:
             raise ValueError("rollout_steps 和 batch_size 必须为正数")
@@ -351,5 +365,7 @@ class TrainConfig:
         if self.algorithm not in ("ppo", "recurrent_ppo"):
             raise ValueError("algorithm 必须是 ppo 或 recurrent_ppo")
         if (self.algorithm == "ppo") != (self.network.recurrent_type == "none"):
-            raise ValueError("普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元")
+            raise ValueError(
+                "普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元"
+            )
         self.ppo.validate(self.env.num_envs)

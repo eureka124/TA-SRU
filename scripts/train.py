@@ -44,7 +44,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="循环单元；lstm 表示 torch.nn.LSTM",
     )
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--seed", type=int, default=None, help="统一控制地图、回合采样和网络随机种子"
+    )
     parser.add_argument(
         "--network-device", default=None, help="默认与 Isaac 仿真设备相同"
     )
@@ -79,7 +81,6 @@ def parse_args() -> argparse.Namespace:
         help="每隔多少次 PPO 更新写入 CSV 和 TensorBoard（默认：1）",
     )
     for option in (
-        "maze-seed",
         "maze-size",
         "train-map-count",
         "eval-map-count",
@@ -210,12 +211,15 @@ def _raise_keyboard_interrupt(_signal_number: int, _frame: object) -> None:
 
 def main() -> None:
     # 日志监控已启动，依赖导入失败也会留下完整异常。
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     import torch
     import warp  # noqa: F401
     from isaaclab.app import AppLauncher
 
     args = parse_args()
+    from ta_sru.config import EnvConfig
     from ta_sru.evaluation import require_scene_checkpoint
+    from ta_sru.reproducibility import seed_torch
     from ta_sru.scene_config import training_env_config
 
     checkpoint = (
@@ -226,6 +230,19 @@ def main() -> None:
     if checkpoint is not None:
         require_scene_checkpoint(checkpoint)
     saved = checkpoint["config"] if checkpoint else None
+    seed = (
+        args.seed
+        if args.seed is not None
+        else (saved["env"]["seed"] if saved else EnvConfig().seed)
+    )
+    if not 0 <= seed <= 2**32 - 1:
+        raise ValueError("seed 必须位于 [0, 4294967295]")
+    # 运行中设置 PYTHONHASHSEED 不会改变当前解释器；在启动仿真前重启一次。
+    # exec 保留监控进程的管道、PID 和日志目录，恢复训练也沿用 checkpoint 种子。
+    if os.environ.get("PYTHONHASHSEED") != str(seed):
+        os.environ["PYTHONHASHSEED"] = str(seed)
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+    seed_torch(seed)
     algorithm = args.algorithm or (
         saved.get("algorithm", "recurrent_ppo") if saved else "recurrent_ppo"
     )
@@ -260,7 +277,6 @@ def main() -> None:
 
         fields = (
             "seed",
-            "maze_seed",
             "maze_size",
             "train_map_count",
             "eval_map_count",
@@ -324,12 +340,15 @@ def main() -> None:
         (log_dir / "commit_id.txt").write_text(commit_id + "\n", encoding="utf-8")
         (log_dir / "diff.patch").write_bytes(diff_content)
         print(f"循环单元：{args.recurrent_type}")
+        print(f"随机种子：{task_config.seed}（PyTorch 确定性计算已启用）")
         print(f"训练日志：{log_dir}")
         print(f"模型目录：{checkpoint_dir}")
         print(f"基准提交：{commit_id}")
         if args.debug:
             print(f"调试输出：{task_config.debug_output_dir}")
         isaac_config = make_isaac_env_cfg(task_config, sim_device=args.device)
+        # 启动器或扩展可能消耗随机数；创建场景前再次固定随机状态。
+        seed_torch(task_config.seed)
         env = IsaacLabWrapper(NavigationEnv(isaac_config, task_config))
         (log_dir / "scene_manifest.json").write_text(
             json.dumps(env.scene_manifest, indent=2), encoding="utf-8"

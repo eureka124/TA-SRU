@@ -137,9 +137,7 @@ def generate_maze(config: EnvConfig, seed: int, name: str = "maze") -> MazeDefin
     )
 
 
-def generate_map(
-    config: EnvConfig, seed: int, name: str = "map"
-) -> MazeDefinition:
+def generate_map(config: EnvConfig, seed: int, name: str = "map") -> MazeDefinition:
     """按场景类型生成一张地图。"""
 
     if config.scene_type == "obstacles":
@@ -163,7 +161,7 @@ def build_map_pools(config: EnvConfig) -> dict[str, list[MazeDefinition]]:
             for attempt in range(1000):
                 seed = int(
                     np.random.SeedSequence(
-                        [config.maze_seed, namespace, index, attempt]
+                        [config.seed, namespace, index, attempt]
                     ).generate_state(1)[0]
                 )
                 maze = generate_map(config, seed, f"{split}_{index:03d}")
@@ -187,9 +185,7 @@ def pool_origins(count: int, extent: float, gap: float) -> np.ndarray:
     ) * (2 * extent + gap)
 
 
-def prism(
-    solid: Solid, origin: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
+def prism(solid: Solid, origin: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """把图元水平截面拉伸成棱柱，返回顶点与逆时针朝外的三角面。"""
 
     corners = solid.corners()

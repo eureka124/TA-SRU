@@ -29,6 +29,7 @@ from ta_sru.envs.toa_sampling import normalized_progress, sample_toa
 from ta_sru.evaluation import (
     EvaluationStats,
     MapQuotaScheduler,
+    configure_evaluation,
     require_scene_checkpoint,
 )
 from ta_sru.scene_config import training_env_config, validate_resume_config
@@ -50,7 +51,7 @@ class DfsTests(unittest.TestCase):
     def test_dfs_tree_boundaries_and_reproducible_pools(self):
         config = self.config(maze_wall_removal_probability=0)
         pools = build_map_pools(config)
-        again = build_map_pools(replace(config, num_envs=99, seed=99))
+        again = build_map_pools(replace(config, num_envs=99))
         hashes = []
         for split, maps in pools.items():
             for maze, other in zip(maps, again[split]):
@@ -62,8 +63,32 @@ class DfsTests(unittest.TestCase):
                 self.assertEqual((~maze.occupied).sum(), nodes * 2 - 1)
                 hashes.append(maze.content_hash)
         self.assertEqual(len(set(hashes)), len(hashes))
+        changed = build_map_pools(replace(config, seed=config.seed + 1))
+        self.assertNotEqual(
+            hashes,
+            [maze.content_hash for maps in changed.values() for maze in maps],
+        )
         opened = generate_maze(replace(config, maze_wall_removal_probability=1), 99)
         self.assertGreater((~opened.occupied).sum(), nodes * 2 - 1)
+
+    def test_legacy_seed_config_for_training_and_evaluation(self):
+        config = self.config(toa_normalization_max=100.0)
+        saved = {**asdict(config), "maze_seed": config.seed}
+        restored = training_env_config(saved, {})
+        self.assertNotIn("maze_seed", asdict(restored))
+        validate_resume_config(saved, restored)
+        evaluated = configure_evaluation(saved)
+        self.assertNotIn("maze_seed", evaluated)
+        self.assertEqual(evaluated["seed"], config.seed)
+        # 旧配置保持原样，避免读取 checkpoint 时修改调用方的记录。
+        self.assertEqual(saved["maze_seed"], config.seed)
+        saved["maze_seed"] += 1
+        with self.assertRaisesRegex(ValueError, "maze_seed"):
+            training_env_config(saved, {})
+        with self.assertRaisesRegex(ValueError, "maze_seed"):
+            validate_resume_config(saved, config)
+        with self.assertRaisesRegex(ValueError, "maze_seed"):
+            configure_evaluation(saved)
 
     def test_wall_rectangles_and_mesh_preserve_occupancy(self):
         config = self.config()
@@ -163,7 +188,8 @@ class DfsTests(unittest.TestCase):
                         self.assertTrue(np.isfinite(t0) and t0 > 0)
 
     def test_start_is_fixed_while_near_and_unreachable_goals_are_rejected(self):
-        config = self.config(goals_per_map=3)
+        # 下方固定坐标按 2 米网格定义，不依赖项目默认地图尺寸。
+        config = self.config(goals_per_map=3, maze_cell_size=2.0)
         starts = np.array([[15, 15]], dtype=np.int32)
         values = np.full(
             (3, config.toa_grid_size, config.toa_grid_size), np.inf, dtype=np.float32
@@ -192,7 +218,7 @@ class DfsTests(unittest.TestCase):
             build_toa_bank(self.config(min_start_goal_distance=100.0))
 
     def test_toa_routes_around_wall_and_unwritable_cache_falls_back(self):
-        config = self.config(toa_slow_speed=1)
+        config = self.config(toa_slow_speed=1, maze_cell_size=2.0)
         occupied = np.zeros((7, 7), dtype=bool)
         occupied[[0, -1], :] = True
         occupied[:, [0, -1]] = True

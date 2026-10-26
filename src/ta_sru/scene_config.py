@@ -15,9 +15,23 @@ RUNTIME_FIELDS = {
 }
 
 
+def normalize_seed_config(values: dict) -> dict:
+    """兼容旧配置中的同值地图种子；不同值无法无损合并，必须显式拒绝。"""
+    values = dict(values)
+    seed = values.get("seed", EnvConfig().seed)
+    maze_seed = values.pop("maze_seed", seed)
+    if maze_seed != seed:
+        raise ValueError(
+            f"旧配置的 seed={seed} 与 maze_seed={maze_seed} 不一致，"
+            "无法在统一种子后保持原地图和回合采样；请使用旧版代码加载该 checkpoint，"
+            "或使用 --seed 重新训练"
+        )
+    return values
+
+
 def training_env_config(saved: dict | None, overrides: dict) -> EnvConfig:
     """缺省 CLI 不覆盖 checkpoint；仅运行参数允许显式改变。"""
-    values = dict(saved) if saved is not None else asdict(EnvConfig())
+    values = normalize_seed_config(saved) if saved is not None else asdict(EnvConfig())
     # 旧 checkpoint 的碰撞课程字段已废弃，恢复时使用固定阈值和完整惩罚。
     values.pop("minimum_contact_force_threshold", None)
     values.pop("contact_penalty_ramp_fraction", None)
@@ -37,7 +51,7 @@ def training_env_config(saved: dict | None, overrides: dict) -> EnvConfig:
 
 
 def validate_resume_config(saved: dict, current: EnvConfig) -> None:
-    saved = dict(saved)
+    saved = normalize_seed_config(saved)
     # 旧训练阈值统一迁移到当前固定阈值，其他参数仍严格校验。
     saved["collision_force_threshold"] = 0.1
     defaults = asdict(EnvConfig())

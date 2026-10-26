@@ -219,6 +219,51 @@ class TaskTests(unittest.TestCase):
 
 
 class AlgorithmTests(unittest.TestCase):
+    def test_same_seed_repeats_ppo_training(self) -> None:
+        config = TrainConfig(
+            env=EnvConfig(num_envs=2, depth_height=12, depth_width=16),
+            network=NetworkConfig(
+                recurrent_hidden_size=8,
+                actor_hidden_sizes=(8,),
+                critic_hidden_sizes=(8,),
+            ),
+            ppo=PPOConfig(
+                rollout_steps=4,
+                batch_size=4,
+                recurrent_sequence_length=2,
+                epochs=1,
+            ),
+            total_timesteps=16,
+            device="cpu",
+        )
+
+        def train():
+            agent = RecurrentPPO(FakeVectorEnv(), config)
+            trajectory = []
+            for _ in range(2):
+                agent.collect_rollout()
+                trajectory.append(agent.update())
+            weights = {
+                key: value.clone() for key, value in agent.policy.state_dict().items()
+            }
+            return trajectory, weights
+
+        first_metrics, first_weights = train()
+        second_metrics, second_weights = train()
+        self.assertEqual(first_metrics, second_metrics)
+        for key in first_weights:
+            self.assertTrue(torch.equal(first_weights[key], second_weights[key]), key)
+
+        # 更换种子必须改变训练结果，避免测试仅覆盖没有随机性的固定路径。
+        config.env.seed += 1
+        _, different_weights = train()
+        self.assertTrue(
+            any(
+                not torch.equal(first_weights[key], different_weights[key])
+                for key in first_weights
+            )
+        )
+
     def test_cpu_buffer_and_ppo_update(self) -> None:
         for recurrent_type in ("sru-lstm", "sru-gru", "sru-lstm-gate", "lstm", "none"):
             with self.subTest(recurrent_type=recurrent_type):

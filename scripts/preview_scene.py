@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
         "--episodes", type=int, default=3, help="每张地图标注的采样回合数；0 只画几何"
     )
     parser.add_argument("--output-dir", type=Path, default=Path("debug/preview"))
-    parser.add_argument("--maze-seed", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--maze-size", type=int, default=None)
     parser.add_argument("--maze-cell-size", type=float, default=None)
     parser.add_argument("--arena-size", type=float, default=None)
@@ -49,8 +49,8 @@ def build_config(args: argparse.Namespace) -> EnvConfig:
         "map_split": args.map_split,
         "toa_cache_dir": None,
     }
-    if args.maze_seed is not None:
-        values["maze_seed"] = args.maze_seed
+    if args.seed is not None:
+        values["seed"] = args.seed
     if args.maze_size is not None:
         values["maze_size"] = args.maze_size
     if args.maze_cell_size is not None:
@@ -93,7 +93,9 @@ def render(maze, pixels: int, overlay: dict | None = None) -> Image.Image:
                 fill=(100, 116, 139),
             )
         else:
-            draw.polygon([point(*corner) for corner in solid.corners()], fill=(100, 116, 139))
+            draw.polygon(
+                [point(*corner) for corner in solid.corners()], fill=(100, 116, 139)
+            )
     if overlay is not None:
         _draw_overlay(draw, point, overlay)
     return image
@@ -112,7 +114,10 @@ def _draw_overlay(draw, point, overlay: dict) -> None:
     for episode in overlay["episodes"]:
         start, goal = point(*episode["start"]), point(*episode["goal"])
         draw.line([start, goal], fill=(56, 189, 248), width=1)
-        draw.ellipse([start[0] - 5, start[1] - 5, start[0] + 5, start[1] + 5], fill=(14, 165, 233))
+        draw.ellipse(
+            [start[0] - 5, start[1] - 5, start[0] + 5, start[1] + 5],
+            fill=(14, 165, 233),
+        )
 
 
 def layout_summary(maze) -> str:
@@ -134,7 +139,11 @@ def layout_summary(maze) -> str:
     return (
         f"{maze.name}: 圆柱 {cylinders} 个、U 形 {len(groups) - cylinders} 个、"
         f"实体 {len(solids)} 块、最小间距 {min(gaps):.3f} m"
-        + (f"、开口朝向 {np.degrees(maze.opening_yaw):.1f}°" if maze.opening_yaw is not None else "")
+        + (
+            f"、开口朝向 {np.degrees(maze.opening_yaw):.1f}°"
+            if maze.opening_yaw is not None
+            else ""
+        )
     )
 
 
@@ -186,14 +195,18 @@ def main() -> None:
         render(maze, args.pixels, overlay).save(path)
         print(layout_summary(maze))
         if overlay is not None:
-            print(f"  目标 {len(overlay['goals'])} 个，可通行起点 {len(overlay['starts'])} 个")
+            print(
+                f"  目标 {len(overlay['goals'])} 个，可通行起点 {len(overlay['starts'])} 个"
+            )
             for episode in overlay["episodes"]:
                 print(
                     f"  回合 G{episode['goal_id']}: 起点→终点直线 "
                     f"{episode['distance']:.1f} m，起点 TOA {episode['toa']:.1f}"
                 )
         print(f"  已保存 {path}")
-    print(f"场地边长 {2 * pools[args.map_split][0].extent:g} m，共 {len(pools[args.map_split])} 张地图")
+    print(
+        f"场地边长 {2 * pools[args.map_split][0].extent:g} m，共 {len(pools[args.map_split])} 张地图"
+    )
 
 
 if __name__ == "__main__":

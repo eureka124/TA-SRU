@@ -5,11 +5,12 @@ from __future__ import annotations
 from unicodedata import east_asian_width
 
 from ta_sru.envs.maze import scene_version
+from ta_sru.scene_config import normalize_seed_config
 
 
 def configure_evaluation(values: dict) -> dict:
     """只覆盖本次评估配置，使用评估地图池和固定碰撞阈值。"""
-    values = dict(values)
+    values = normalize_seed_config(values)
     # 兼容仍包含碰撞课程字段的旧 checkpoint。
     values.pop("minimum_contact_force_threshold", None)
     values.pop("contact_penalty_ramp_fraction", None)

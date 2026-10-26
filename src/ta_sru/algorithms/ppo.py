@@ -23,6 +23,7 @@ from ta_sru.models.actor_critic import (
     RecurrentState,
     require_supported_action_transform,
 )
+from ta_sru.reproducibility import seed_torch
 
 ObservationArray = dict[str, np.ndarray]
 
@@ -51,8 +52,7 @@ class RecurrentPPO:
         self.env = env
         self.config = config
         self.device = _resolve_device(config.device)
-        torch.manual_seed(config.env.seed)
-        np.random.seed(config.env.seed)
+        seed_torch(config.env.seed)
         self.rng = np.random.default_rng(config.env.seed)
         self.policy = AsymmetricRecurrentActorCritic(config.network).to(self.device)
         # tutorial 的 CNN、循环网络及策略头均参与优化。

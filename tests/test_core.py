@@ -265,6 +265,14 @@ class AlgorithmTests(unittest.TestCase):
         )
 
     def test_cpu_buffer_and_ppo_update(self) -> None:
+        class ActionRewardEnv(FakeVectorEnv):
+            def step(self, actions):
+                observation, reward, terminated, truncated, infos = super().step(
+                    actions
+                )
+                # 用动作相关奖励提供非恒定优势，避免归一化后策略梯度恰好为零。
+                return observation, reward + actions[:, 0], terminated, truncated, infos
+
         for recurrent_type in ("sru-lstm", "sru-gru", "sru-lstm-gate", "lstm", "none"):
             with self.subTest(recurrent_type=recurrent_type):
                 config = TrainConfig(
@@ -286,7 +294,7 @@ class AlgorithmTests(unittest.TestCase):
                     total_timesteps=8,
                     device="cpu",
                 )
-                agent = RecurrentPPO(FakeVectorEnv(), config)
+                agent = RecurrentPPO(ActionRewardEnv(), config)
                 self.assertEqual(agent.buffer.storage_device, "cpu")
                 self.assertTrue(
                     all(
@@ -302,7 +310,16 @@ class AlgorithmTests(unittest.TestCase):
                     .weight.detach()
                     .clone()
                 )
+                attention_before = (
+                    agent.policy.actor_encoder.attention.in_proj_weight.detach().clone()
+                )
                 metrics = agent.update()
+                self.assertFalse(
+                    torch.equal(
+                        attention_before,
+                        agent.policy.actor_encoder.attention.in_proj_weight,
+                    )
+                )
                 self.assertFalse(
                     torch.equal(
                         before, agent.policy.critic_encoder.camera.convolution[0].weight
@@ -355,7 +372,16 @@ class AlgorithmTests(unittest.TestCase):
             self.assertEqual(restored.optimizer.param_groups[0]["lr"], 2e-4)
             artifact_path = export_actor(path, Path(directory) / "actor.pt")
             artifact = torch.load(artifact_path, map_location="cpu", weights_only=True)
-            self.assertEqual(artifact["version"], 4)
+            self.assertEqual(artifact["version"], 5)
+            self.assertEqual(
+                artifact["network"]["architecture"], "cross_attention_cnn_v1"
+            )
+            self.assertIn("actor_encoder.attention.in_proj_weight", artifact["actor"])
+            self.assertFalse(any(key.startswith("critic") for key in artifact["actor"]))
+            torch.testing.assert_close(
+                artifact["actor"]["actor_encoder.attention.in_proj_weight"],
+                agent.policy.actor_encoder.attention.in_proj_weight,
+            )
             self.assertTrue(
                 any(
                     key.startswith("actor_encoder.camera.") for key in artifact["actor"]
@@ -366,6 +392,13 @@ class AlgorithmTests(unittest.TestCase):
             # 旧版本，在另一个分支上静默加载。
             saved = torch.load(path, map_location="cpu", weights_only=True)
             self.assertEqual(saved["action_transform"], "clamp")
+
+            # 头数变化不会改变参数形状，也必须在恢复前拒绝，防止静默改变策略。
+            saved["config"]["network"]["attention_heads"] = 8
+            torch.save(saved, path)
+            with self.assertRaisesRegex(ValueError, "attention 配置不一致"):
+                restored.load(path)
+            saved["config"]["network"]["attention_heads"] = 4
 
             # 未记录调度方式的旧 checkpoint 仍能加载，并启用新的初始学习率。
             saved["config"]["ppo"].pop("schedule")

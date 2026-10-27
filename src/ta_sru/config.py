@@ -174,15 +174,8 @@ class EnvConfig:
             value = getattr(self, name)
             if not isfinite(value) or value <= 0:
                 raise ValueError(f"{name} 必须为有限正数")
-        if (
-            not 0.0
-            < self.depth_min_distance
-            < self.depth_max_distance
-            < self.depth_invalid_distance
-        ):
-            raise ValueError(
-                "深度量程必须满足 0 < depth_min_distance < depth_max_distance < depth_invalid_distance"
-            )
+        if not 0.0 < self.depth_min_distance < self.depth_max_distance < self.depth_invalid_distance:
+            raise ValueError("深度量程必须满足 0 < depth_min_distance < depth_max_distance < depth_invalid_distance")
         for name in ("safety_margin", "spawn_margin", "obstacle_min_separation"):
             if not isfinite(getattr(self, name)) or getattr(self, name) < 0:
                 raise ValueError(f"{name} 必须为有限非负数")
@@ -198,22 +191,15 @@ class EnvConfig:
             raise ValueError("seed 必须位于 [0, 4294967295]")
         if not 0 <= self.maze_wall_removal_probability <= 1:
             raise ValueError("拆墙概率必须位于 [0, 1]")
-        if self.cell_size <= 2 * (
-            self.drone_radius + self.safety_margin + self.spawn_margin
-        ):
+        if self.cell_size <= 2 * (self.drone_radius + self.safety_margin + self.spawn_margin):
             raise ValueError("场景栅格宽度不足以容纳无人机及出生余量")
-        if (
-            self.map_split not in ("train", "eval")
-            or self.evaluation_episodes_per_map < 0
-        ):
+        if self.map_split not in ("train", "eval") or self.evaluation_episodes_per_map < 0:
             raise ValueError("地图池或评估配额不合法")
         if self.toa_crop_size != 16:
             raise ValueError("Critic TOA 输入必须保持 16×16")
         if self.toa_safe_distance <= 0.0 or not 0.0 < self.toa_slow_speed <= 1.0:
             raise ValueError("TOA 安全距离必须为正，慢速比例必须位于 (0, 1]")
-        if self.toa_normalization_max is not None and not (
-            0.0 < self.toa_normalization_max < float("inf")
-        ):
+        if self.toa_normalization_max is not None and not (0.0 < self.toa_normalization_max < float("inf")):
             raise ValueError("toa_normalization_max 必须为有限正数或 None")
         if any(low >= high for low, high in zip(self.action_low, self.action_high)):
             raise ValueError("每个动作下界都必须小于上界")
@@ -223,10 +209,14 @@ class EnvConfig:
 class NetworkConfig:
     """非对称 Actor–Critic 网络配置。"""
 
-    # 标记当前结构，避免把旧 RegNet checkpoint 当成可训练小 CNN 静默恢复。
-    architecture: str = "tutorial_cnn_v1"
-    # 深度图、机体状态与 TOA 分支投影后相加，直接作为循环网络输入。
+    # 新训练启用 Actor 空间交叉注意力；旧 checkpoint 保留原有相加融合。
+    architecture: str = "cross_attention_cnn_v1"
+    # 融合特征与交叉注意力的宽度，直接作为循环网络输入。
     feature_dim: int = 192
+    # 状态作为单个查询，视觉网格作为键和值；输出宽度仍为 feature_dim。
+    attention_heads: int = 4
+    attention_grid: tuple[int, int] = (4, 6)
+    attention_residual_init: float = 0.1
     # 限制每次卷积处理的图像数量，独立于 PPO minibatch 的样本数。
     cnn_chunk_size: int = 128
     # 更新时重算 CNN 激活，避免大 minibatch 同时保留所有卷积中间结果。
@@ -248,25 +238,33 @@ class NetworkConfig:
     def from_checkpoint(cls, values: dict) -> NetworkConfig:
         """仅恢复明确记录当前网络结构的 checkpoint。"""
 
-        if values.get("architecture") != "tutorial_cnn_v1":
+        if values.get("architecture") not in (
+            "tutorial_cnn_v1",
+            "cross_attention_cnn_v1",
+        ):
             raise ValueError(
-                "checkpoint 使用旧网络结构；当前已恢复 tutorial 的可训练小 CNN、"
-                "192 维融合特征和独立 Actor/Critic。旧 RegNet 或早期 CNN 权重不能"
-                "直接恢复、评估或导出，请使用对应版本代码或重新训练。"
+                "checkpoint 使用旧网络结构或未知结构；当前支持 tutorial 小 CNN 及其" "Actor 交叉注意力版本。旧 RegNet 或早期 CNN 权重不能" "直接恢复、评估或导出，请使用对应版本代码或重新训练。"
             )
         config = cls(**values)
         config.validate()
         return config
 
     def validate(self) -> None:
-        if self.architecture != "tutorial_cnn_v1":
-            raise ValueError("当前网络只支持 tutorial_cnn_v1 结构")
+        if self.architecture not in ("tutorial_cnn_v1", "cross_attention_cnn_v1"):
+            raise ValueError("网络结构必须为 tutorial_cnn_v1 或 cross_attention_cnn_v1")
         self.recurrent_type = normalize_recurrent_type(self.recurrent_type)
         if self.recurrent_type not in RECURRENT_TYPES:
             choices = ", ".join(RECURRENT_TYPES)
             raise ValueError(f"recurrent_type 必须是以下值之一：{choices}")
         if self.feature_dim <= 0 or self.recurrent_hidden_size <= 0:
             raise ValueError("feature_dim 和 recurrent_hidden_size 必须为正数")
+        if self.architecture == "cross_attention_cnn_v1":
+            if not isinstance(self.attention_heads, int) or self.attention_heads <= 0 or self.feature_dim % self.attention_heads != 0:
+                raise ValueError("attention_heads 必须为正整数且整除 feature_dim")
+            if len(self.attention_grid) != 2 or any(not isinstance(size, int) or size <= 0 for size in self.attention_grid) or self.attention_grid[0] * self.attention_grid[1] <= 1:
+                raise ValueError("attention_grid 必须包含两个正整数且至少有两个 token")
+            if not isfinite(self.attention_residual_init):
+                raise ValueError("attention_residual_init 必须为有限数")
         if self.cnn_chunk_size <= 0:
             raise ValueError("cnn_chunk_size 必须为正数")
         if self.recurrent_layers <= 0:
@@ -313,9 +311,7 @@ class PPOConfig:
             raise ValueError("schedule 必须是 adaptive 或 fixed")
         if not isfinite(self.learning_rate) or self.learning_rate <= 0:
             raise ValueError("learning_rate 必须为有限正数")
-        if self.target_kl is not None and (
-            not isfinite(self.target_kl) or self.target_kl <= 0
-        ):
+        if self.target_kl is not None and (not isfinite(self.target_kl) or self.target_kl <= 0):
             raise ValueError("target_kl 必须为有限正数或 None")
         if self.rollout_steps <= 0 or self.batch_size <= 0:
             raise ValueError("rollout_steps 和 batch_size 必须为正数")
@@ -365,7 +361,5 @@ class TrainConfig:
         if self.algorithm not in ("ppo", "recurrent_ppo"):
             raise ValueError("algorithm 必须是 ppo 或 recurrent_ppo")
         if (self.algorithm == "ppo") != (self.network.recurrent_type == "none"):
-            raise ValueError(
-                "普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元"
-            )
+            raise ValueError("普通 PPO 必须使用 recurrent_type=none，循环 PPO 必须指定循环单元")
         self.ppo.validate(self.env.num_envs)

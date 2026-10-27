@@ -551,7 +551,16 @@ class RecurrentPPO:
             if checkpoint["scene_manifest"] != self.env.scene_manifest:
                 raise ValueError("checkpoint 地图/目标池或 TOA 定义不一致")
         saved_algorithm = checkpoint["config"].get("algorithm", "recurrent_ppo")
-        NetworkConfig.from_checkpoint(checkpoint["config"]["network"])
+        saved_network = NetworkConfig.from_checkpoint(checkpoint["config"]["network"])
+        if saved_network.architecture != self.config.network.architecture or (
+            saved_network.architecture == "cross_attention_cnn_v1"
+            and (
+                saved_network.attention_heads != self.config.network.attention_heads
+                or tuple(saved_network.attention_grid)
+                != tuple(self.config.network.attention_grid)
+            )
+        ):
+            raise ValueError("checkpoint 网络架构或 attention 配置不一致，不能直接恢复")
         if saved_algorithm != self.config.algorithm:
             raise ValueError(
                 f"checkpoint 算法 {saved_algorithm} 与当前 {self.config.algorithm} 不一致"
@@ -561,7 +570,7 @@ class RecurrentPPO:
         except RuntimeError as error:
             raise RuntimeError(
                 f"checkpoint 网络结构与当前代码不一致，无法加载：{path}。"
-                "当前使用 tutorial 的独立可训练小 CNN，请检查网络宽度和循环单元配置。"
+                "请检查网络架构、宽度、attention 配置和循环单元配置。"
             ) from error
         if load_optimizer and "optimizer" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer"])

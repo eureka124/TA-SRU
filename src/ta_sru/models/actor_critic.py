@@ -139,6 +139,81 @@ class ActorEncoder(nn.Module):
         )
 
 
+class CrossAttentionActorEncoder(ActorEncoder):
+    """状态查询视觉空间 token，保留全局视觉与状态相加的残差路径。"""
+
+    def __init__(self, robot_state_size: int, config: NetworkConfig) -> None:
+        super().__init__(robot_state_size, config)
+        width = config.feature_dim
+        rows, columns = config.attention_grid
+        self.spatial_pool = nn.AdaptiveAvgPool2d((rows, columns))
+        self.token_projection = nn.Linear(32, width)
+        # 行列编码组合成二维位置，使注意力能区分图像的上下与左右。
+        self.row_position = nn.Parameter(torch.empty(rows, width))
+        self.column_position = nn.Parameter(torch.empty(columns, width))
+        nn.init.normal_(self.row_position, std=0.02)
+        nn.init.normal_(self.column_position, std=0.02)
+        self.query_norm = nn.LayerNorm(width)
+        self.token_norm = nn.LayerNorm(width)
+        self.attention = nn.MultiheadAttention(
+            width, config.attention_heads, dropout=0.0, batch_first=True
+        )
+        self.residual_scale = nn.Parameter(
+            torch.tensor(float(config.attention_residual_init))
+        )
+
+    def _encode_chunk(
+        self, image: torch.Tensor, robot_state: torch.Tensor
+    ) -> torch.Tensor:
+        # 复用原 CNN 的一次卷积结果；保留其参数键名和 2×3 全局投影路径。
+        spatial = self.camera.convolution[:-2](image)
+        global_feature = self.camera.projection(self.camera.convolution[-2:](spatial))
+        state_feature = self.robot_state(robot_state)
+        tokens = self.spatial_pool(spatial).flatten(2).transpose(1, 2)
+        position = (
+            self.row_position[:, None, :] + self.column_position[None, :, :]
+        ).flatten(0, 1)
+        tokens = self.token_norm(self.token_projection(tokens) + position)
+        query = self.query_norm(state_feature).unsqueeze(1)
+        attended, _ = self.attention(query, tokens, tokens, need_weights=False)
+        return (
+            global_feature + state_feature + self.residual_scale * attended.squeeze(1)
+        )
+
+    def forward(self, observation: Observation) -> torch.Tensor:
+        image = observation["camera"]
+        prefix = image.shape[:-3]
+        if observation["robot_state"].shape != (*prefix, self.robot_state.in_features):
+            raise ValueError("camera 与 robot_state 的时间和批量维度必须一致")
+        flat_image = image.reshape(-1, *image.shape[-3:]).float()
+        flat_state = (
+            observation["robot_state"].reshape(-1, self.robot_state.in_features).float()
+        )
+        chunks = []
+        # 时间与环境合并到批量轴；注意力仅在每张图的空间轴上计算。
+        for image_chunk, state_chunk in zip(
+            flat_image.split(self.camera.chunk_size),
+            flat_state.split(self.camera.chunk_size),
+        ):
+            if (
+                self.training
+                and torch.is_grad_enabled()
+                and self.camera.gradient_checkpointing
+            ):
+                # 连同注意力一起重算，避免保存整个 PPO minibatch 的视觉激活。
+                encoded = checkpoint(
+                    self._encode_chunk,
+                    image_chunk,
+                    state_chunk,
+                    use_reentrant=False,
+                    preserve_rng_state=False,
+                )
+            else:
+                encoded = self._encode_chunk(image_chunk, state_chunk)
+            chunks.append(encoded)
+        return torch.cat(chunks, dim=0).reshape(*prefix, -1)
+
+
 class CriticEncoder(nn.Module):
     """独立的两层深度图、TOA CNN 与机体状态投影。"""
 
@@ -170,7 +245,7 @@ class AsymmetricRecurrentActorCritic(nn.Module):
     """使用 tutorial 独立可训练 CNN 的非对称 Actor–Critic。
 
     Actor 与 Critic 各自持有深度图 CNN、状态投影、循环单元和 MLP；
-    Critic 另有 TOA CNN，各分支相加后直接进入循环单元。
+    Critic 另有 TOA CNN；Actor 可在相加融合上叠加状态查询视觉的交叉注意力。
     """
 
     action_size = 3
@@ -180,7 +255,12 @@ class AsymmetricRecurrentActorCritic(nn.Module):
         super().__init__()
         config.validate()
         self.config = config
-        self.actor_encoder = ActorEncoder(self.robot_state_size, config)
+        actor_encoder = (
+            CrossAttentionActorEncoder
+            if config.architecture == "cross_attention_cnn_v1"
+            else ActorEncoder
+        )
+        self.actor_encoder = actor_encoder(self.robot_state_size, config)
         self.critic_encoder = CriticEncoder(self.robot_state_size, config)
         self.actor_recurrent = build_recurrent(
             config.recurrent_type,

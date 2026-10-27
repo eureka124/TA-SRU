@@ -467,9 +467,9 @@ Isaac Sim / PhysX → NavigationEnv → IsaacLabWrapper → PPO
 
 默认物理频率为 120 Hz，每 5 个物理步执行一次策略决策，即 24 Hz。修改地图生成看 `envs/maze.py`，修改奖励/终止看 `envs/navigation.py`，修改网络看 `models/actor_critic.py`、`models/recurrent.py`、`models/depth_encoder.py` 和 `NetworkConfig`。
 
-### 网络结构（对齐 tutorial）
+### 网络结构（小 CNN 与 Actor 交叉注意力）
 
-默认结构对齐 `~/tutorial` 的 `ActorFeaturesExtractor`、`CriticFeaturesExtractor` 和 `sb3_ppo_cfg.yaml`：
+CNN 主干及原有全局融合路径对齐 `~/tutorial` 的 `ActorFeaturesExtractor`、`CriticFeaturesExtractor` 和 `sb3_ppo_cfg.yaml`：
 
 | 分支 | 卷积结构 | 池化与投影 |
 | --- | --- | --- |
@@ -477,15 +477,28 @@ Isaac Sim / PhysX → NavigationEnv → IsaacLabWrapper → PPO
 | Critic 深度图 | `1→8`（2×2）、`8→16`（3×3） | 池化到 2×3，展平 96，线性层输出 192 |
 | Critic TOA | `1→8`（2×2）、`8→16`（3×3） | 池化到 2×3，展平 96，线性层输出 192 |
 
-各卷积步长为 1、无填充，后接 LeakyReLU。Actor 与 Critic 分别持有 `8→192` 的机体状态线性层：Actor 将深度图与状态特征相加，Critic 将深度图、状态与 TOA 特征相加。融合输出为 **192 维**，直接送入各自的循环网络，默认 SRU-LSTM、隐藏维度 **256**、一层；没有额外循环前投影。循环后的 Actor MLP 为 **[512,512]**，Critic MLP 为 **[256,256]**，激活函数均为 LeakyReLU，分别输出三维高斯动作均值和状态价值。
+各卷积步长为 1、无填充，后接 LeakyReLU。Actor 与 Critic 分别持有 `8→192` 的机体状态线性层。Critic 将深度图、状态与 TOA 特征相加。Actor 保留深度图与状态相加的全局路径，并默认叠加状态查询视觉的单层 cross attention：
+
+```text
+深度图 → Actor CNN ┬→ 2×3 池化 → 全局投影 ─────────────────┐
+                  └→ 4×6 池化 → 24 个 token → 投影 + 二维位置 → LN → K/V
+8维状态 → 状态投影 ┬──────────────────────────────────────┤
+                  └→ LN → 单个 Query → 4头 Cross Attention → α倍 → 相加
+```
+
+二维位置编码由可学习的行、列编码组成。attention 宽度默认 192、4 个头、dropout 为 0；可学习残差系数 `α` 初值为 0.1。每个时刻只查询当前图像的空间 token，不跨时间或环境，也不读取 TOA。全局路径与 attention 复用一次卷积结果。
+
+融合输出为 **192 维**，直接送入各自的循环网络，默认 SRU-LSTM、隐藏维度 **256**、一层；没有额外循环前投影。循环后的 Actor MLP 为 **[512,512]**，Critic MLP 为 **[256,256]**，激活函数均为 LeakyReLU，分别输出三维高斯动作均值和状态价值。`NetworkConfig` 的 `attention_heads`、`attention_grid`、`attention_residual_init` 控制注意力配置；头数必须整除 `feature_dim`，网格至少包含两个 token。
+
+新训练默认使用 `cross_attention_cnn_v1`。运行原有相加融合基线时，在训练命令中添加 `--architecture tutorial_cnn_v1`；也可显式指定 `--architecture cross_attention_cnn_v1`。恢复训练沿用 checkpoint 中的架构，不能借助 `--resume` 把旧网络切换成 attention 网络，需启动新的训练实验。
 
 CNN、状态投影、循环网络与策略头均参与 PPO 更新。rollout buffer 保存原始 `camera`、`robot_state` 和 `critic_toa`；训练 minibatch 重新运行可训练 CNN，不缓存其特征。Actor 不读取 TOA，部署仅需深度图和机体状态。`feature_dim` 默认 192，可独立于相机分辨率调整；Actor 的三次卷积要求深度图高宽至少为 6。
 
-为限制大 minibatch 的显存峰值，三个 CNN 均按 `network.cnn_chunk_size` 分块处理图像（默认 128 张），更新时默认启用 `network.cnn_gradient_checkpointing`：反向传播重算各块的卷积激活，以增加计算换取显存。此设置保持网络结构、PPO batch size 和每次更新的梯度语义；仅分块而不重算，仍会保留整个 minibatch 的激活。采样和评估无需梯度时只分块，不重算。旧 `tutorial_cnn_v1` checkpoint 缺少这两个字段时采用上述默认值，权重仍可直接加载。
+为限制大 minibatch 的显存峰值，三个 CNN 均按 `network.cnn_chunk_size` 分块处理图像（默认 128 张），更新时默认启用 `network.cnn_gradient_checkpointing`：反向传播重算各块的卷积激活，Actor 的 attention 也在块内一同重算，以增加计算换取显存。此设置保持网络结构、PPO batch size 和每次更新的梯度语义；仅分块而不重算，仍会保留整个 minibatch 的激活。采样和评估无需梯度时只分块，不重算。旧 `tutorial_cnn_v1` checkpoint 缺少这两个字段时采用上述默认值，权重仍可直接加载。
 
-此次只恢复网络结构，深度观测仍保留当前米制语义：相机原图先做非有限值清理及 4×4 最小池化，再将量程外读数置 0，默认得到 48×64 深度图。奖励与 PPO 的 KL 自适应学习率设置保留。
+深度观测仍保留当前米制语义：相机原图先做非有限值清理及 4×4 最小池化，再将量程外读数置 0，默认得到 48×64 深度图。奖励与 PPO 的 KL 自适应学习率设置保留。
 
-新 checkpoint 的 `network.architecture` 为 `tutorial_cnn_v1`，导出版本为 **4**。旧 RegNet、带循环前投影或早期 CNN checkpoint 缺少当前结构标记，不能直接恢复、评估或导出；需要使用对应历史代码或重新训练，避免混用网络与输入语义。
+新训练 checkpoint 的 `network.architecture` 默认为 `cross_attention_cnn_v1`，导出版本为 **5**。旧 `tutorial_cnn_v1` checkpoint 仍可恢复、评估和导出，按原有相加融合构造网络，不会自动增加 attention。旧 RegNet、带循环前投影或早期 CNN checkpoint 缺少支持的结构标记，不能直接恢复、评估或导出；需要使用对应历史代码或重新训练，避免混用网络与输入语义。
 
 Lee 控制器在机体系力矩中加入 `Ω × (JΩ)`，补偿刚体方程的陀螺耦合。接触历史检测及控制器修复会改变旧 checkpoint 的仿真轨迹和结局；与修复前的评估结果比较时，请同时记录代码版本。
 
@@ -499,7 +512,7 @@ python scripts/export_actor.py \
 
 输出为项目定义的 PyTorch 权重与配置字典，不是 TorchScript 或 ONNX，也不是 `play.py` 接受的完整训练 checkpoint。
 
-导出产物的 `version` 为 4，`network` 段记录当前网络配置，`observation` 段记录深度量程、分辨率和动作边界。部署侧输入 `camera` 仍为**米制深度**（0 表示无效）；`actor` 段包含 `actor_encoder.camera.*`、状态投影、循环网络、MLP 与动作头权重，不包含 Critic 或历史 RegNet 编码器。
+导出产物的 `version` 为 5，`network` 段记录架构与注意力等网络配置，`observation` 段记录深度量程、分辨率和动作边界。部署侧输入 `camera` 仍为**米制深度**（0 表示无效）；`actor` 段包含 `actor_encoder.*`（含启用时的 attention、位置编码、归一化与残差系数）、循环网络、MLP 与动作头权重，不包含 Critic 或历史 RegNet 编码器。部署加载器需支持版本 5，并依据 `network.architecture` 构造对应网络。
 
 ## 8. 验证与第三方来源
 

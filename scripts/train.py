@@ -32,6 +32,12 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description="训练 Hummingbird 迷宫导航策略")
     parser.add_argument("--algorithm", choices=("ppo", "recurrent_ppo"), default=None)
+    parser.add_argument(
+        "--architecture",
+        choices=("tutorial_cnn_v1", "cross_attention_cnn_v1"),
+        default=None,
+        help="新训练默认 cross_attention_cnn_v1；恢复时沿用 checkpoint 架构",
+    )
     parser.add_argument("--num-envs", type=int, default=4)
     parser.add_argument("--total-timesteps", type=int, default=70_000_000)
     parser.add_argument("--rollout-steps", type=int, default=512)
@@ -230,6 +236,11 @@ def main() -> None:
     if checkpoint is not None:
         require_scene_checkpoint(checkpoint)
     saved = checkpoint["config"] if checkpoint else None
+    architecture = args.architecture or (
+        saved["network"].get("architecture", "") if saved else "cross_attention_cnn_v1"
+    )
+    if saved and architecture != saved["network"].get("architecture"):
+        raise ValueError("恢复训练时不能更换网络架构，请重新训练")
     seed = (
         args.seed
         if args.seed is not None
@@ -316,7 +327,9 @@ def main() -> None:
             env=task_config,
             network=NetworkConfig.from_checkpoint(saved["network"])
             if saved
-            else NetworkConfig(recurrent_type=args.recurrent_type),
+            else NetworkConfig(
+                architecture=architecture, recurrent_type=args.recurrent_type
+            ),
             algorithm=algorithm,
             ppo=PPOConfig(
                 rollout_steps=args.rollout_steps,

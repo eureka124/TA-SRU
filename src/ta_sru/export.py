@@ -31,7 +31,8 @@ ENV_KEYS = (
 )
 # 版本 3：恢复 tutorial 可训练小 CNN 和 192 维融合；深度输入仍为米制深度。
 # 版本 4：observation 段移除从未被相机读取的 camera_horizontal_fov。
-ARTIFACT_VERSION = 4
+# 版本 5：新增 Actor 交叉注意力架构及其配置和权重。
+ARTIFACT_VERSION = 5
 
 
 def export_actor(checkpoint_path, output_path):

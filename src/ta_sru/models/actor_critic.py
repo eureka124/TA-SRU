@@ -65,6 +65,29 @@ def _mlp(input_size: int, hidden_sizes: tuple[int, ...]) -> tuple[nn.Sequential,
     return nn.Sequential(*layers), previous_size
 
 
+class DeterministicAdaptiveAvgPool2d(nn.Module):
+    """按自适应池化的分区求均值，支持 CUDA 严格确定性反向传播。"""
+
+    def __init__(self, output_size: tuple[int, int]) -> None:
+        super().__init__()
+        self.output_size = output_size
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        height, width = image.shape[-2:]
+        rows, columns = self.output_size
+        pooled = []
+        for row in range(rows):
+            # 起点向下取整、终点向上取整；不能整除时相邻分区可以重叠。
+            top = row * height // rows
+            bottom = ((row + 1) * height + rows - 1) // rows
+            for column in range(columns):
+                left = column * width // columns
+                right = ((column + 1) * width + columns - 1) // columns
+                pooled.append(image[..., top:bottom, left:right].mean(dim=(-2, -1)))
+        # 切片与均值的反向传播避免原生 CUDA 自适应池化的非确定性累加。
+        return torch.stack(pooled, dim=-1).reshape(*image.shape[:-2], rows, columns)
+
+
 class ImageEncoder(nn.Module):
     """小型 CNN；自适应池化让输入分辨率可调整。"""
 
@@ -91,7 +114,7 @@ class ImageEncoder(nn.Module):
                 )
             )
             input_channels = output_channels
-        layers.extend((nn.AdaptiveAvgPool2d((2, 3)), nn.Flatten()))
+        layers.extend((DeterministicAdaptiveAvgPool2d((2, 3)), nn.Flatten()))
         self.convolution = nn.Sequential(*layers)
         self.projection = nn.Linear(input_channels * 2 * 3, output_size)
 
@@ -146,7 +169,7 @@ class CrossAttentionActorEncoder(ActorEncoder):
         super().__init__(robot_state_size, config)
         width = config.feature_dim
         rows, columns = config.attention_grid
-        self.spatial_pool = nn.AdaptiveAvgPool2d((rows, columns))
+        self.spatial_pool = DeterministicAdaptiveAvgPool2d((rows, columns))
         self.token_projection = nn.Linear(32, width)
         # 行列编码组合成二维位置，使注意力能区分图像的上下与左右。
         self.row_position = nn.Parameter(torch.empty(rows, width))

@@ -21,6 +21,8 @@ Python 最低版本由 `pyproject.toml` 声明为 3.10；实际还需满足所�
 
 USD 资产配置了 Git LFS。通过 Git 克隆后，如果资产仍是 LFS 指针文件，需要先安装 Git LFS 并执行 `git lfs pull`，取得真实模型文件。
 
+机体外力施加在运行时适配 Isaac Lab 版本：2.3.2 及以后调用 `permanent_wrench_composer.set_forces_and_torques`，更早版本（含 1.4）回退到 `set_external_force_and_torque`，见 `src/ta_sru/envs/wrench.py`；训练脚本不需要在启动前改写源码。
+
 当前默认网络恢复为 `~/tutorial` 的可训练小 CNN，不加载深度编码器预训练权重。仓库保留的 RegNetX 模块与 `assets/depth_encoder/vae_pretrain_new.pth` 仅用于历史实现对照，当前训练、评估和导出均不使用它们。
 
 ## 2. 文件与目录用途

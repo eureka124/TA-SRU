@@ -81,3 +81,4 @@ debug/
 .cache/
 !scripts/check_dfs_scene.py
 !tests/test_training_logging.py
+!tests/test_wrench_compat.py

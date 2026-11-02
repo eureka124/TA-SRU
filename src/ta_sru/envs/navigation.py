@@ -40,6 +40,7 @@ from ta_sru.envs.toa import (
     save_toa_global_maps,
 )
 from ta_sru.envs.toa_sampling import normalized_progress, sample_toa
+from ta_sru.envs.wrench import set_body_wrench
 from ta_sru.evaluation import MapQuotaScheduler
 from ta_sru.models.hummingbird import (
     HummingbirdParameters,
@@ -432,11 +433,11 @@ class NavigationEnv(DirectRLEnv):
         )
         forces = torch.zeros((self.num_envs, 1, 3), device=self.device)
         forces[:, 0, 2] = wrench[:, 0]
-        self.robot.set_external_force_and_torque(
+        set_body_wrench(
+            self.robot,
             forces,
             wrench[:, 1:4].unsqueeze(1),
             body_ids=self.base_link_ids,
-            is_global=False,
         )
 
     def _depth_observation(self) -> torch.Tensor:

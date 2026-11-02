@@ -12,6 +12,7 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 
 from ta_sru.config import EnvConfig
+from ta_sru.envs.wrench import set_body_wrench
 from ta_sru.models.hummingbird import HummingbirdParameters
 from ta_sru.models.hummingbird_asset import HUMMINGBIRD_CFG
 from ta_sru.models.lee_controller import LeePositionController
@@ -110,11 +111,11 @@ class ControllerStepTestRig:
         self.last_wrench.copy_(wrench)
         forces = wrench.new_zeros((3, 1, 3))
         forces[:, 0, 2] = wrench[:, 0]
-        self.robot.set_external_force_and_torque(
+        set_body_wrench(
+            self.robot,
             forces,
             wrench[:, 1:4].unsqueeze(1),
             body_ids=self.base_link_ids,
-            is_global=False,
         )
         self.scene.write_data_to_sim()
         # Isaac Sim 4.5 的带渲染 step 可能推进多个物理子步，必须分开调用。
